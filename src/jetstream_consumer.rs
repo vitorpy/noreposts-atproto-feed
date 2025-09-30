@@ -3,7 +3,7 @@ use atproto_jetstream::{Consumer, ConsumerTaskConfig, EventHandler, JetstreamEve
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
-use tracing::{error, warn};
+use tracing::{error, warn, info, debug};
 
 use crate::{database::Database, types::{Follow, Post}};
 
@@ -17,10 +17,12 @@ impl JetstreamEventHandler {
     }
 
     pub async fn start(&self, jetstream_hostname: String) -> Result<()> {
+        info!("Starting Jetstream consumer, connecting to {}", jetstream_hostname);
+
         let config = ConsumerTaskConfig {
             user_agent: "following-no-reposts-feed/1.0".to_string(),
             compression: true,
-            jetstream_hostname,
+            jetstream_hostname: jetstream_hostname.clone(),
             zstd_dictionary_location: String::new(),
             collections: vec![
                 "app.bsky.feed.post".to_string(),
@@ -33,9 +35,11 @@ impl JetstreamEventHandler {
         };
 
         let consumer = Consumer::new(config);
+        info!("Registering event handler...");
         consumer.register_handler(Arc::new(self.clone())).await?;
 
         let cancellation_token = CancellationToken::new();
+        info!("Starting Jetstream consumer background task...");
         
         // Start cleanup task
         let db_cleanup = Arc::clone(&self.db);
@@ -68,9 +72,11 @@ impl EventHandler for JetstreamEventHandler {
         if let JetstreamEvent::Commit { did, time_us: _, kind: _, commit } = event {
             match commit.collection.as_str() {
                 "app.bsky.feed.post" => {
+                    debug!("Received post event from {}", did);
                     self.handle_post_event(&did, &commit.collection, &commit.rkey, &commit.operation, Some(&commit.record), &commit.cid).await?;
                 }
                 "app.bsky.graph.follow" => {
+                    info!("Received follow event: {} -> target", did);
                     self.handle_follow_event(&did, &commit.collection, &commit.rkey, &commit.operation, Some(&commit.record)).await?;
                 }
                 _ => {} // Ignore other collections
@@ -121,16 +127,18 @@ impl JetstreamEventHandler {
                         .with_timezone(&Utc);
 
                     let post = Post {
-                        uri,
+                        uri: uri.clone(),
                         cid: cid.to_string(),
                         author_did: did.to_string(),
-                        text,
+                        text: text.clone(),
                         created_at,
                         indexed_at: Utc::now(),
                     };
 
                     if let Err(e) = self.db.insert_post(&post).await {
                         error!("Failed to insert post: {}", e);
+                    } else {
+                        debug!("Inserted post: {} by {}", uri, did);
                     }
                 }
             }
@@ -174,15 +182,17 @@ impl JetstreamEventHandler {
                         .with_timezone(&Utc);
 
                     let follow = Follow {
-                        uri,
+                        uri: uri.clone(),
                         follower_did: did.to_string(),
-                        target_did,
+                        target_did: target_did.clone(),
                         created_at,
                         indexed_at: Utc::now(),
                     };
 
                     if let Err(e) = self.db.insert_follow(&follow).await {
                         error!("Failed to insert follow: {}", e);
+                    } else {
+                        info!("Inserted follow: {} -> {}", did, target_did);
                     }
                 }
             }

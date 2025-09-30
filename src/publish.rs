@@ -93,13 +93,20 @@ pub async fn publish_feed() -> Result<()> {
         record,
     };
 
-    client
+    let response = client
         .post(format!("{}/xrpc/com.atproto.repo.putRecord", pds_url))
         .header("Authorization", format!("Bearer {}", login_response.access_jwt))
         .json(&put_request)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await?;
+        eprintln!("Error response: {}", error_text);
+        return Err(anyhow!("Failed to publish feed: {}", error_text));
+    }
+
+    response.error_for_status()?;
 
     println!("\n✅ Feed published successfully!");
     println!("🔗 Feed AT-URI: at://{}/app.bsky.feed.generator/{}", login_response.did, record_name);

@@ -7,12 +7,14 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use sqlx::Row;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
 mod auth;
+mod backfill;
 mod database;
 mod feed_algorithm;
 mod jetstream_consumer;
@@ -185,6 +187,27 @@ async fn get_feed_skeleton(
             ).into_response();
         }
     };
+
+    // Check if user has any follows, if not, backfill them
+    let db_for_backfill = Arc::clone(&state.db);
+    let requester_did_clone = requester_did.clone();
+    tokio::spawn(async move {
+        // Check if we have any follows for this user
+        let has_follows = sqlx::query("SELECT COUNT(*) as count FROM follows WHERE follower_did = ?")
+            .bind(&requester_did_clone)
+            .fetch_one(&db_for_backfill.pool)
+            .await
+            .ok()
+            .and_then(|row| row.try_get::<i64, _>("count").ok())
+            .unwrap_or(0);
+
+        if has_follows == 0 {
+            info!("No follows found for {}, triggering backfill", requester_did_clone);
+            if let Err(e) = backfill::backfill_follows(db_for_backfill, &requester_did_clone).await {
+                warn!("Backfill failed for {}: {}", requester_did_clone, e);
+            }
+        }
+    });
 
     let feed_algorithm = FollowingNoRepostsFeed::new(Arc::clone(&state.db));
 

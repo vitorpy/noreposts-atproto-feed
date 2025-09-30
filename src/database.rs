@@ -5,7 +5,7 @@ use sqlx::{SqlitePool, Row};
 use crate::types::{Follow, Post};
 
 pub struct Database {
-    pool: SqlitePool,
+    pub pool: SqlitePool,
 }
 
 impl Database {

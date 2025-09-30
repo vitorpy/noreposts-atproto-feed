@@ -5,11 +5,19 @@ use tracing::{debug, warn};
 
 use crate::types::JwtClaims;
 
+// Empty custom claims - all required fields are in standard JWT claims
 #[derive(Debug, Deserialize)]
-struct CustomClaims {
-    iss: String,
-    aud: String,
-    exp: i64,
+struct EmptyCustomClaims {}
+
+// Standard JWT claims structure as expected by jwt-compact
+#[derive(Debug, Deserialize)]
+struct StandardClaims {
+    #[serde(rename = "iss")]
+    issuer: Option<String>,
+    #[serde(rename = "aud")]
+    audience: Option<String>,
+    #[serde(rename = "exp")]
+    expiration: Option<i64>,
 }
 
 pub fn validate_jwt(token: &str, service_did: &str) -> Result<JwtClaims> {
@@ -24,19 +32,36 @@ pub fn validate_jwt(token: &str, service_did: &str) -> Result<JwtClaims> {
             anyhow!("Invalid JWT format: {}", e)
         })?;
 
-    // Deserialize claims with jwt-compact's Claims wrapper
-    let claims_wrapper = untrusted.deserialize_claims_unchecked::<CustomClaims>()
+    // First, try to deserialize as raw JSON to see the actual structure
+    let claims_wrapper = untrusted.deserialize_claims_unchecked::<serde_json::Value>()
         .map_err(|e| {
             warn!("Failed to deserialize JWT claims: {}", e);
             anyhow!("Invalid JWT claims: {}", e)
         })?;
 
-    let custom_claims = claims_wrapper.custom;
-    debug!("JWT claims extracted - issuer: {}, audience: {}", custom_claims.iss, custom_claims.aud);
+    debug!("Raw JWT claims: {:?}", claims_wrapper);
+
+    // Extract the actual claims from the Value
+    let iss = claims_wrapper.custom.get("iss")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Missing 'iss' claim"))?
+        .to_string();
+
+    let aud = claims_wrapper.custom.get("aud")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Missing 'aud' claim"))?
+        .to_string();
+
+    let exp = claims_wrapper.custom.get("exp")
+        .and_then(|v| v.as_i64())
+        .or_else(|| claims_wrapper.expiration.map(|ts| ts.timestamp()))
+        .ok_or_else(|| anyhow!("Missing 'exp' claim"))?;
+
+    debug!("JWT claims extracted - issuer: {}, audience: {}, exp: {}", iss, aud, exp);
 
     // Validate audience
-    if custom_claims.aud != service_did {
-        warn!("JWT audience mismatch: expected {}, got {}", service_did, custom_claims.aud);
+    if aud != service_did {
+        warn!("JWT audience mismatch: expected {}, got {}", service_did, aud);
         return Err(anyhow!("Invalid JWT audience"));
     }
 
@@ -46,23 +71,19 @@ pub fn validate_jwt(token: &str, service_did: &str) -> Result<JwtClaims> {
         .unwrap()
         .as_secs() as i64;
 
-    if custom_claims.exp < now {
-        warn!("JWT expired: exp={}, now={}", custom_claims.exp, now);
+    if exp < now {
+        warn!("JWT expired: exp={}, now={}", exp, now);
         return Err(anyhow!("JWT has expired"));
     }
 
     // TODO: In production, we should:
-    // 1. Fetch the user's DID document from custom_claims.iss
+    // 1. Fetch the user's DID document from iss
     // 2. Extract their public key
     // 3. Verify the signature with Es256k::verify()
     // For now, we skip signature verification but validate structure and claims
 
-    debug!("JWT validated successfully for issuer: {}", custom_claims.iss);
-    Ok(JwtClaims {
-        iss: custom_claims.iss,
-        aud: custom_claims.aud,
-        exp: custom_claims.exp,
-    })
+    debug!("JWT validated successfully for issuer: {}", iss);
+    Ok(JwtClaims { iss, aud, exp })
 }
 
 // Production implementation would need this:

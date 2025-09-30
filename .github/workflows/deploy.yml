@@ -49,6 +49,12 @@ jobs:
             ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
             "mkdir -p /var/www/noreposts-feed"
 
+      - name: Stop service before deploy
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "systemctl stop noreposts-feed || true"
+
       - name: Deploy binary and migration
         run: |
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \

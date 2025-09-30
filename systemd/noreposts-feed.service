@@ -1,0 +1,23 @@
+[Unit]
+Description=NoReposts ATProto Feed Generator
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/noreposts-feed
+ExecStart=/var/www/noreposts-feed/following-no-reposts-feed
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Environment file
+EnvironmentFile=/var/www/noreposts-feed/.env
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

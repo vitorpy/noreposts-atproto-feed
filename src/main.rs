@@ -1,0 +1,136 @@
+use anyhow::Result;
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::Json,
+    routing::get,
+    Router,
+};
+use clap::Parser;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tower_http::cors::CorsLayer;
+use tracing::{info, warn};
+
+mod auth;
+mod database;
+mod feed_algorithm;
+mod jetstream_consumer;
+mod types;
+
+use crate::{
+    auth::validate_jwt,
+    database::Database,
+    feed_algorithm::FollowingNoRepostsFeed,
+    jetstream_consumer::JetstreamEventHandler,
+    types::*,
+};
+
+#[derive(Parser)]
+#[command(name = "following-no-reposts-feed")]
+#[command(about = "A Bluesky feed generator for following without reposts")]
+struct Args {
+    #[arg(long, env = "DATABASE_URL", default_value = "sqlite:./feed.db")]
+    database_url: String,
+
+    #[arg(long, env = "PORT", default_value = "3000")]
+    port: u16,
+
+    #[arg(long, env = "FEEDGEN_HOSTNAME")]
+    hostname: String,
+
+    #[arg(long, env = "FEEDGEN_SERVICE_DID")]
+    service_did: String,
+
+    #[arg(long, env = "JETSTREAM_HOSTNAME", default_value = "jetstream1.us-east.bsky.network")]
+    jetstream_hostname: String,
+}
+
+#[derive(Clone)]
+struct AppState {
+    db: Arc<Database>,
+    service_did: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    dotenvy::dotenv().ok();
+
+    let args = Args::parse();
+
+    // Initialize database
+    let db = Arc::new(Database::new(&args.database_url).await?);
+    db.migrate().await?;
+
+    let app_state = AppState {
+        db: Arc::clone(&db),
+        service_did: args.service_did.clone(),
+    };
+
+    // Start Jetstream consumer
+    let event_handler = JetstreamEventHandler::new(Arc::clone(&db));
+    tokio::spawn(async move {
+        if let Err(e) = event_handler.start(args.jetstream_hostname).await {
+            warn!("Jetstream consumer error: {}", e);
+        }
+    });
+
+    // Setup web server
+    let app = Router::new()
+        .route("/", get(root))
+        .route("/.well-known/did.json", get(did_document))
+        .route("/xrpc/app.bsky.feed.getFeedSkeleton", get(get_feed_skeleton))
+        .layer(CorsLayer::permissive())
+        .with_state(app_state);
+
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port)).await?;
+    info!("Feed generator listening on port {}", args.port);
+
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn root() -> &'static str {
+    "Following No Reposts Feed Generator"
+}
+
+async fn did_document(State(state): State<AppState>) -> Json<DidDocument> {
+    Json(DidDocument {
+        context: vec!["https://www.w3.org/ns/did/v1".to_string()],
+        id: state.service_did.clone(),
+        service: vec![ServiceEndpoint {
+            id: "#bsky_fg".to_string(),
+            service_type: "BskyFeedGenerator".to_string(),
+            service_endpoint: format!("https://{}", std::env::var("FEEDGEN_HOSTNAME").unwrap_or_default()),
+        }],
+    })
+}
+
+async fn get_feed_skeleton(
+    Query(params): Query<FeedSkeletonParams>,
+    State(state): State<AppState>,
+) -> Result<Json<FeedSkeletonResponse>, StatusCode> {
+    // Validate JWT if provided
+    let requester_did = if let Some(auth_header) = params.auth {
+        match validate_jwt(&auth_header, &state.service_did) {
+            Ok(claims) => Some(claims.iss),
+            Err(_) => return Err(StatusCode::UNAUTHORIZED),
+        }
+    } else {
+        None
+    };
+
+    let feed_algorithm = FollowingNoRepostsFeed::new(Arc::clone(&state.db));
+    
+    match feed_algorithm
+        .generate_feed(requester_did, params.limit, params.cursor)
+        .await
+    {
+        Ok(response) => Ok(Json(response)),
+        Err(e) => {
+            warn!("Feed generation error: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}

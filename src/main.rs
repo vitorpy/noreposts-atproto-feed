@@ -188,7 +188,7 @@ async fn get_feed_skeleton(
         }
     };
 
-    // Check if user has any follows, if not, backfill them
+    // Check if user has any follows, if not, backfill them and their posts
     let db_for_backfill = Arc::clone(&state.db);
     let requester_did_clone = requester_did.clone();
     tokio::spawn(async move {
@@ -203,8 +203,17 @@ async fn get_feed_skeleton(
 
         if has_follows == 0 {
             info!("No follows found for {}, triggering backfill", requester_did_clone);
-            if let Err(e) = backfill::backfill_follows(db_for_backfill, &requester_did_clone).await {
-                warn!("Backfill failed for {}: {}", requester_did_clone, e);
+
+            // First backfill follows
+            if let Err(e) = backfill::backfill_follows(Arc::clone(&db_for_backfill), &requester_did_clone).await {
+                warn!("Follow backfill failed for {}: {}", requester_did_clone, e);
+                return;
+            }
+
+            // Then backfill recent posts from each follow (10 posts per user)
+            info!("Starting post backfill for {}", requester_did_clone);
+            if let Err(e) = backfill::backfill_posts_for_follows(Arc::clone(&db_for_backfill), &requester_did_clone, 10).await {
+                warn!("Post backfill failed for {}: {}", requester_did_clone, e);
             }
         }
     });

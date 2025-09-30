@@ -14,6 +14,7 @@ StandardError=journal
 
 # Environment file
 EnvironmentFile=/var/www/noreposts-feed/.env
+Environment="RUST_LOG=info"
 
 # Security hardening
 NoNewPrivileges=true

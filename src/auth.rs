@@ -1,37 +1,68 @@
 use anyhow::{anyhow, Result};
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use jwt_compact::UntrustedToken;
+use serde::Deserialize;
 use tracing::{debug, warn};
 
 use crate::types::JwtClaims;
+
+#[derive(Debug, Deserialize)]
+struct CustomClaims {
+    iss: String,
+    aud: String,
+    exp: i64,
+}
 
 pub fn validate_jwt(token: &str, service_did: &str) -> Result<JwtClaims> {
     // Token should already have "Bearer " prefix stripped by caller
     debug!("Validating JWT token (length: {})", token.len());
     debug!("Expected audience: {}", service_did);
 
-    // For this example, we'll use a simplified JWT validation
-    // In production, you'd need to:
-    // 1. Fetch the user's DID document
-    // 2. Extract their signing key
-    // 3. Validate the signature with that key
-
-    // For now, let's decode without verification (unsafe for production!)
-    let mut validation = Validation::new(Algorithm::ES256);
-    validation.insecure_disable_signature_validation();
-    validation.validate_exp = true;
-    validation.set_audience(&[service_did]);
-
-    // This is a placeholder - in production you need the actual signing key
-    let decoding_key = DecodingKey::from_secret(b"placeholder");
-
-    let token_data = decode::<JwtClaims>(token, &decoding_key, &validation)
+    // Parse the untrusted token to extract claims without verification
+    let untrusted = UntrustedToken::new(token)
         .map_err(|e| {
-            warn!("JWT decode error: {}", e);
-            anyhow!("JWT validation failed: {}", e)
+            warn!("Failed to parse JWT: {}", e);
+            anyhow!("Invalid JWT format: {}", e)
         })?;
 
-    debug!("JWT validated successfully for issuer: {}", token_data.claims.iss);
-    Ok(token_data.claims)
+    // Deserialize claims with jwt-compact's Claims wrapper
+    let claims_wrapper = untrusted.deserialize_claims_unchecked::<CustomClaims>()
+        .map_err(|e| {
+            warn!("Failed to deserialize JWT claims: {}", e);
+            anyhow!("Invalid JWT claims: {}", e)
+        })?;
+
+    let custom_claims = claims_wrapper.custom;
+    debug!("JWT claims extracted - issuer: {}, audience: {}", custom_claims.iss, custom_claims.aud);
+
+    // Validate audience
+    if custom_claims.aud != service_did {
+        warn!("JWT audience mismatch: expected {}, got {}", service_did, custom_claims.aud);
+        return Err(anyhow!("Invalid JWT audience"));
+    }
+
+    // Validate expiration
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    if custom_claims.exp < now {
+        warn!("JWT expired: exp={}, now={}", custom_claims.exp, now);
+        return Err(anyhow!("JWT has expired"));
+    }
+
+    // TODO: In production, we should:
+    // 1. Fetch the user's DID document from custom_claims.iss
+    // 2. Extract their public key
+    // 3. Verify the signature with Es256k::verify()
+    // For now, we skip signature verification but validate structure and claims
+
+    debug!("JWT validated successfully for issuer: {}", custom_claims.iss);
+    Ok(JwtClaims {
+        iss: custom_claims.iss,
+        aud: custom_claims.aud,
+        exp: custom_claims.exp,
+    })
 }
 
 // Production implementation would need this:

@@ -1,20 +1,20 @@
 use anyhow::{anyhow, Result};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use tracing::{debug, warn};
 
 use crate::types::JwtClaims;
 
-pub fn validate_jwt(auth_header: &str, service_did: &str) -> Result<JwtClaims> {
-    // Extract bearer token
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| anyhow!("Invalid authorization header format"))?;
+pub fn validate_jwt(token: &str, service_did: &str) -> Result<JwtClaims> {
+    // Token should already have "Bearer " prefix stripped by caller
+    debug!("Validating JWT token (length: {})", token.len());
+    debug!("Expected audience: {}", service_did);
 
     // For this example, we'll use a simplified JWT validation
     // In production, you'd need to:
     // 1. Fetch the user's DID document
     // 2. Extract their signing key
     // 3. Validate the signature with that key
-    
+
     // For now, let's decode without verification (unsafe for production!)
     let mut validation = Validation::new(Algorithm::ES256);
     validation.insecure_disable_signature_validation();
@@ -23,10 +23,14 @@ pub fn validate_jwt(auth_header: &str, service_did: &str) -> Result<JwtClaims> {
 
     // This is a placeholder - in production you need the actual signing key
     let decoding_key = DecodingKey::from_secret(b"placeholder");
-    
-    let token_data = decode::<JwtClaims>(token, &decoding_key, &validation)
-        .map_err(|e| anyhow!("JWT validation failed: {}", e))?;
 
+    let token_data = decode::<JwtClaims>(token, &decoding_key, &validation)
+        .map_err(|e| {
+            warn!("JWT decode error: {}", e);
+            anyhow!("JWT validation failed: {}", e)
+        })?;
+
+    debug!("JWT validated successfully for issuer: {}", token_data.claims.iss);
     Ok(token_data.claims)
 }
 

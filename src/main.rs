@@ -16,6 +16,7 @@ mod auth;
 mod database;
 mod feed_algorithm;
 mod jetstream_consumer;
+mod publish;
 mod types;
 
 use crate::{
@@ -30,6 +31,9 @@ use crate::{
 #[command(name = "following-no-reposts-feed")]
 #[command(about = "A Bluesky feed generator for following without reposts")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     #[arg(long, env = "DATABASE_URL", default_value = "sqlite:./feed.db")]
     database_url: String,
 
@@ -37,13 +41,21 @@ struct Args {
     port: u16,
 
     #[arg(long, env = "FEEDGEN_HOSTNAME")]
-    hostname: String,
+    hostname: Option<String>,
 
     #[arg(long, env = "FEEDGEN_SERVICE_DID")]
-    service_did: String,
+    service_did: Option<String>,
 
     #[arg(long, env = "JETSTREAM_HOSTNAME", default_value = "jetstream1.us-east.bsky.network")]
     jetstream_hostname: String,
+}
+
+#[derive(Parser)]
+enum Command {
+    /// Publish the feed to Bluesky
+    Publish,
+    /// Run the feed generator server (default)
+    Serve,
 }
 
 #[derive(Clone)]
@@ -59,13 +71,23 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Handle publish command
+    if matches!(args.command, Some(Command::Publish)) {
+        return publish::publish_feed().await;
+    }
+
+    // Default to serve mode
+    let service_did = args.service_did
+        .or_else(|| args.hostname.clone().map(|h| format!("did:web:{}", h)))
+        .expect("FEEDGEN_SERVICE_DID or FEEDGEN_HOSTNAME must be set");
+
     // Initialize database
     let db = Arc::new(Database::new(&args.database_url).await?);
     db.migrate().await?;
 
     let app_state = AppState {
         db: Arc::clone(&db),
-        service_did: args.service_did.clone(),
+        service_did: service_did.clone(),
     };
 
     // Start Jetstream consumer

@@ -90,8 +90,8 @@ impl Database {
             FROM posts p
             INNER JOIN follows f ON f.target_did = p.author_did
             WHERE f.follower_did = ?
-                AND p.indexed_at < ?
-            ORDER BY p.indexed_at DESC
+                AND p.created_at < ?
+            ORDER BY p.created_at DESC
             LIMIT ?
             "#
         )

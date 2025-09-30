@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{StatusCode, HeaderMap},
     response::Json,
     routing::get,
     Router,
@@ -130,26 +130,51 @@ async fn did_document(State(state): State<AppState>) -> Json<DidDocument> {
 }
 
 async fn get_feed_skeleton(
+    headers: HeaderMap,
     Query(params): Query<FeedSkeletonParams>,
     State(state): State<AppState>,
 ) -> Result<Json<FeedSkeletonResponse>, StatusCode> {
-    // Validate JWT if provided
-    let requester_did = if let Some(auth_header) = params.auth {
-        match validate_jwt(&auth_header, &state.service_did) {
-            Ok(claims) => Some(claims.iss),
-            Err(_) => return Err(StatusCode::UNAUTHORIZED),
+    info!("Received feed skeleton request for feed: {}", params.feed);
+
+    // Validate JWT if provided in Authorization header
+    let requester_did = if let Some(auth_header) = headers.get("authorization") {
+        let auth_str = auth_header.to_str().map_err(|_| {
+            warn!("Invalid authorization header format");
+            StatusCode::UNAUTHORIZED
+        })?;
+
+        // Remove "Bearer " prefix if present
+        let token = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
+
+        info!("Validating JWT for request");
+        match validate_jwt(token, &state.service_did) {
+            Ok(claims) => {
+                info!("Authenticated request from DID: {}", claims.iss);
+                Some(claims.iss)
+            },
+            Err(e) => {
+                warn!("JWT validation failed: {}", e);
+                return Err(StatusCode::UNAUTHORIZED);
+            }
         }
     } else {
+        info!("Unauthenticated request (no Authorization header)");
         None
     };
 
     let feed_algorithm = FollowingNoRepostsFeed::new(Arc::clone(&state.db));
-    
+
+    info!("Generating feed for requester: {:?}, limit: {:?}, cursor: {:?}",
+          requester_did, params.limit, params.cursor);
+
     match feed_algorithm
         .generate_feed(requester_did, params.limit, params.cursor)
         .await
     {
-        Ok(response) => Ok(Json(response)),
+        Ok(response) => {
+            info!("Successfully generated feed with {} posts", response.feed.len());
+            Ok(Json(response))
+        },
         Err(e) => {
             warn!("Feed generation error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)

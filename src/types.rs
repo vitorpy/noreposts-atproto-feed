@@ -6,8 +6,6 @@ pub struct FeedSkeletonParams {
     pub feed: String,
     pub limit: Option<i32>,
     pub cursor: Option<String>,
-    #[serde(rename = "Authorization")]
-    pub auth: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

@@ -63,3 +63,10 @@ pub struct JwtClaims {
     pub aud: String, // audience (feed generator DID)
     pub exp: i64,    // expiration time
 }
+
+// ATProto Error Response
+#[derive(Debug, Serialize)]
+pub struct ErrorResponse {
+    pub error: String,
+    pub message: String,
+}

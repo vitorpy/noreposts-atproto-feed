@@ -2,7 +2,7 @@ use anyhow::Result;
 use axum::{
     extract::{Query, State},
     http::{StatusCode, HeaderMap},
-    response::Json,
+    response::{Json, IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -133,51 +133,81 @@ async fn get_feed_skeleton(
     headers: HeaderMap,
     Query(params): Query<FeedSkeletonParams>,
     State(state): State<AppState>,
-) -> Result<Json<FeedSkeletonResponse>, StatusCode> {
+) -> Response {
     info!("Received feed skeleton request for feed: {}", params.feed);
 
-    // Validate JWT if provided in Authorization header
-    let requester_did = if let Some(auth_header) = headers.get("authorization") {
-        let auth_str = auth_header.to_str().map_err(|_| {
-            warn!("Invalid authorization header format");
-            StatusCode::UNAUTHORIZED
-        })?;
-
-        // Remove "Bearer " prefix if present
-        let token = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
-
-        info!("Validating JWT for request");
-        match validate_jwt(token, &state.service_did) {
-            Ok(claims) => {
-                info!("Authenticated request from DID: {}", claims.iss);
-                Some(claims.iss)
-            },
-            Err(e) => {
-                warn!("JWT validation failed: {}", e);
-                return Err(StatusCode::UNAUTHORIZED);
-            }
+    // This feed requires authentication since it's personalized
+    let auth_header = match headers.get("authorization") {
+        Some(h) => h,
+        None => {
+            warn!("Missing Authorization header - this feed requires authentication");
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(types::ErrorResponse {
+                    error: "AuthenticationRequired".to_string(),
+                    message: "This feed shows posts from accounts you follow and requires authentication".to_string(),
+                })
+            ).into_response();
         }
-    } else {
-        info!("Unauthenticated request (no Authorization header)");
-        None
+    };
+
+    let auth_str = match auth_header.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            warn!("Invalid authorization header format");
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(types::ErrorResponse {
+                    error: "AuthenticationRequired".to_string(),
+                    message: "Invalid authorization header format".to_string(),
+                })
+            ).into_response();
+        }
+    };
+
+    // Remove "Bearer " prefix if present
+    let token = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
+
+    info!("Validating JWT for request");
+    let requester_did = match validate_jwt(token, &state.service_did) {
+        Ok(claims) => {
+            info!("Authenticated request from DID: {}", claims.iss);
+            claims.iss
+        },
+        Err(e) => {
+            warn!("JWT validation failed: {}", e);
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(types::ErrorResponse {
+                    error: "AuthenticationRequired".to_string(),
+                    message: format!("JWT validation failed: {}", e),
+                })
+            ).into_response();
+        }
     };
 
     let feed_algorithm = FollowingNoRepostsFeed::new(Arc::clone(&state.db));
 
-    info!("Generating feed for requester: {:?}, limit: {:?}, cursor: {:?}",
+    info!("Generating feed for requester: {}, limit: {:?}, cursor: {:?}",
           requester_did, params.limit, params.cursor);
 
     match feed_algorithm
-        .generate_feed(requester_did, params.limit, params.cursor)
+        .generate_feed(Some(requester_did), params.limit, params.cursor)
         .await
     {
         Ok(response) => {
             info!("Successfully generated feed with {} posts", response.feed.len());
-            Ok(Json(response))
+            Json(response).into_response()
         },
         Err(e) => {
             warn!("Feed generation error: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(types::ErrorResponse {
+                    error: "InternalServerError".to_string(),
+                    message: format!("Failed to generate feed: {}", e),
+                })
+            ).into_response()
         }
     }
 }

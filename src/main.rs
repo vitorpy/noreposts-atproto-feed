@@ -92,11 +92,20 @@ async fn main() -> Result<()> {
         service_did: service_did.clone(),
     };
 
-    // Start Jetstream consumer
+    // Start Jetstream consumer with automatic reconnection
     let event_handler = JetstreamEventHandler::new(Arc::clone(&db));
+    let jetstream_hostname = args.jetstream_hostname.clone();
     tokio::spawn(async move {
-        if let Err(e) = event_handler.start(args.jetstream_hostname).await {
-            warn!("Jetstream consumer error: {}", e);
+        loop {
+            info!("Starting Jetstream consumer...");
+            if let Err(e) = event_handler.start(jetstream_hostname.clone()).await {
+                warn!("Jetstream consumer error: {}. Reconnecting in 5 seconds...", e);
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            } else {
+                // Consumer stopped without error, wait before restarting
+                warn!("Jetstream consumer stopped unexpectedly. Reconnecting in 5 seconds...");
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            }
         }
     });
 

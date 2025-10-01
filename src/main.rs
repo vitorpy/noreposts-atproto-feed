@@ -1,8 +1,8 @@
 use anyhow::Result;
 use axum::{
     extract::{Query, State},
-    http::{StatusCode, HeaderMap},
-    response::{Json, IntoResponse, Response},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Json, Response},
     routing::get,
     Router,
 };
@@ -23,12 +23,8 @@ mod publish;
 mod types;
 
 use crate::{
-    admin_socket::AdminSocket,
-    auth::validate_jwt,
-    database::Database,
-    feed_algorithm::FollowingNoRepostsFeed,
-    jetstream_consumer::JetstreamEventHandler,
-    types::*,
+    admin_socket::AdminSocket, auth::validate_jwt, database::Database,
+    feed_algorithm::FollowingNoRepostsFeed, jetstream_consumer::JetstreamEventHandler, types::*,
 };
 
 #[derive(Parser)]
@@ -50,10 +46,18 @@ struct Args {
     #[arg(long, env = "FEEDGEN_SERVICE_DID")]
     service_did: Option<String>,
 
-    #[arg(long, env = "JETSTREAM_HOSTNAME", default_value = "jetstream1.us-east.bsky.network")]
+    #[arg(
+        long,
+        env = "JETSTREAM_HOSTNAME",
+        default_value = "jetstream1.us-east.bsky.network"
+    )]
     jetstream_hostname: String,
 
-    #[arg(long, env = "ADMIN_SOCKET", default_value = "/var/run/noreposts-feed.sock")]
+    #[arg(
+        long,
+        env = "ADMIN_SOCKET",
+        default_value = "/var/run/noreposts-feed.sock"
+    )]
     admin_socket: String,
 }
 
@@ -84,7 +88,8 @@ async fn main() -> Result<()> {
     }
 
     // Default to serve mode
-    let service_did = args.service_did
+    let service_did = args
+        .service_did
         .or_else(|| args.hostname.clone().map(|h| format!("did:web:{}", h)))
         .expect("FEEDGEN_SERVICE_DID or FEEDGEN_HOSTNAME must be set");
 
@@ -124,7 +129,10 @@ async fn main() -> Result<()> {
         loop {
             info!("Starting Jetstream consumer...");
             if let Err(e) = event_handler.start(jetstream_hostname.clone()).await {
-                warn!("Jetstream consumer error: {}. Reconnecting in 5 seconds...", e);
+                warn!(
+                    "Jetstream consumer error: {}. Reconnecting in 5 seconds...",
+                    e
+                );
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             } else {
                 // Consumer stopped without error, wait before restarting
@@ -138,7 +146,10 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/", get(root))
         .route("/.well-known/did.json", get(did_document))
-        .route("/xrpc/app.bsky.feed.getFeedSkeleton", get(get_feed_skeleton))
+        .route(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            get(get_feed_skeleton),
+        )
         .layer(CorsLayer::permissive())
         .with_state(app_state);
 
@@ -160,7 +171,10 @@ async fn did_document(State(state): State<AppState>) -> Json<DidDocument> {
         service: vec![ServiceEndpoint {
             id: "#bsky_fg".to_string(),
             service_type: "BskyFeedGenerator".to_string(),
-            service_endpoint: format!("https://{}", std::env::var("FEEDGEN_HOSTNAME").unwrap_or_default()),
+            service_endpoint: format!(
+                "https://{}",
+                std::env::var("FEEDGEN_HOSTNAME").unwrap_or_default()
+            ),
         }],
     })
 }
@@ -181,9 +195,12 @@ async fn get_feed_skeleton(
                 StatusCode::UNAUTHORIZED,
                 Json(types::ErrorResponse {
                     error: "AuthenticationRequired".to_string(),
-                    message: "This feed shows posts from accounts you follow and requires authentication".to_string(),
-                })
-            ).into_response();
+                    message:
+                        "This feed shows posts from accounts you follow and requires authentication"
+                            .to_string(),
+                }),
+            )
+                .into_response();
         }
     };
 
@@ -196,8 +213,9 @@ async fn get_feed_skeleton(
                 Json(types::ErrorResponse {
                     error: "AuthenticationRequired".to_string(),
                     message: "Invalid authorization header format".to_string(),
-                })
-            ).into_response();
+                }),
+            )
+                .into_response();
         }
     };
 
@@ -209,7 +227,7 @@ async fn get_feed_skeleton(
         Ok(claims) => {
             info!("Authenticated request from DID: {}", claims.iss);
             claims.iss
-        },
+        }
         Err(e) => {
             warn!("JWT validation failed: {}", e);
             return (
@@ -217,8 +235,9 @@ async fn get_feed_skeleton(
                 Json(types::ErrorResponse {
                     error: "AuthenticationRequired".to_string(),
                     message: format!("JWT validation failed: {}", e),
-                })
-            ).into_response();
+                }),
+            )
+                .into_response();
         }
     };
 
@@ -227,26 +246,38 @@ async fn get_feed_skeleton(
     let requester_did_clone = requester_did.clone();
     tokio::spawn(async move {
         // Check if we have any follows for this user
-        let has_follows = sqlx::query("SELECT COUNT(*) as count FROM follows WHERE follower_did = ?")
-            .bind(&requester_did_clone)
-            .fetch_one(&db_for_backfill.pool)
-            .await
-            .ok()
-            .and_then(|row| row.try_get::<i64, _>("count").ok())
-            .unwrap_or(0);
+        let has_follows =
+            sqlx::query("SELECT COUNT(*) as count FROM follows WHERE follower_did = ?")
+                .bind(&requester_did_clone)
+                .fetch_one(&db_for_backfill.pool)
+                .await
+                .ok()
+                .and_then(|row| row.try_get::<i64, _>("count").ok())
+                .unwrap_or(0);
 
         if has_follows == 0 {
-            info!("No follows found for {}, triggering backfill", requester_did_clone);
+            info!(
+                "No follows found for {}, triggering backfill",
+                requester_did_clone
+            );
 
             // First backfill follows
-            if let Err(e) = backfill::backfill_follows(Arc::clone(&db_for_backfill), &requester_did_clone).await {
+            if let Err(e) =
+                backfill::backfill_follows(Arc::clone(&db_for_backfill), &requester_did_clone).await
+            {
                 warn!("Follow backfill failed for {}: {}", requester_did_clone, e);
                 return;
             }
 
             // Then backfill recent posts from each follow (10 posts per user)
             info!("Starting post backfill for {}", requester_did_clone);
-            if let Err(e) = backfill::backfill_posts_for_follows(Arc::clone(&db_for_backfill), &requester_did_clone, 10).await {
+            if let Err(e) = backfill::backfill_posts_for_follows(
+                Arc::clone(&db_for_backfill),
+                &requester_did_clone,
+                10,
+            )
+            .await
+            {
                 warn!("Post backfill failed for {}: {}", requester_did_clone, e);
             }
         }
@@ -254,17 +285,22 @@ async fn get_feed_skeleton(
 
     let feed_algorithm = FollowingNoRepostsFeed::new(Arc::clone(&state.db));
 
-    info!("Generating feed for requester: {}, limit: {:?}, cursor: {:?}",
-          requester_did, params.limit, params.cursor);
+    info!(
+        "Generating feed for requester: {}, limit: {:?}, cursor: {:?}",
+        requester_did, params.limit, params.cursor
+    );
 
     match feed_algorithm
         .generate_feed(Some(requester_did), params.limit, params.cursor)
         .await
     {
         Ok(response) => {
-            info!("Successfully generated feed with {} posts", response.feed.len());
+            info!(
+                "Successfully generated feed with {} posts",
+                response.feed.len()
+            );
             Json(response).into_response()
-        },
+        }
         Err(e) => {
             warn!("Feed generation error: {}", e);
             (
@@ -272,8 +308,9 @@ async fn get_feed_skeleton(
                 Json(types::ErrorResponse {
                     error: "InternalServerError".to_string(),
                     message: format!("Failed to generate feed: {}", e),
-                })
-            ).into_response()
+                }),
+            )
+                .into_response()
         }
     }
 }

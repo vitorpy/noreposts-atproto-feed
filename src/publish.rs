@@ -52,8 +52,7 @@ pub async fn publish_feed() -> Result<()> {
     dotenvy::dotenv().ok();
     let feedgen_service_did = std::env::var("FEEDGEN_SERVICE_DID")
         .or_else(|_| {
-            std::env::var("FEEDGEN_HOSTNAME")
-                .map(|hostname| format!("did:web:{}", hostname))
+            std::env::var("FEEDGEN_HOSTNAME").map(|hostname| format!("did:web:{}", hostname))
         })
         .map_err(|_| anyhow!("Please set FEEDGEN_SERVICE_DID or FEEDGEN_HOSTNAME in .env file"))?;
 
@@ -81,7 +80,11 @@ pub async fn publish_feed() -> Result<()> {
         record_type: "app.bsky.feed.generator".to_string(),
         did: feedgen_service_did,
         display_name,
-        description: if description.is_empty() { None } else { Some(description) },
+        description: if description.is_empty() {
+            None
+        } else {
+            Some(description)
+        },
         created_at: chrono::Utc::now().to_rfc3339(),
     };
 
@@ -95,7 +98,10 @@ pub async fn publish_feed() -> Result<()> {
 
     let response = client
         .post(format!("{}/xrpc/com.atproto.repo.putRecord", pds_url))
-        .header("Authorization", format!("Bearer {}", login_response.access_jwt))
+        .header(
+            "Authorization",
+            format!("Bearer {}", login_response.access_jwt),
+        )
         .json(&put_request)
         .send()
         .await?;
@@ -109,9 +115,15 @@ pub async fn publish_feed() -> Result<()> {
     response.error_for_status()?;
 
     println!("\n✅ Feed published successfully!");
-    println!("🔗 Feed AT-URI: at://{}/app.bsky.feed.generator/{}", login_response.did, record_name);
+    println!(
+        "🔗 Feed AT-URI: at://{}/app.bsky.feed.generator/{}",
+        login_response.did, record_name
+    );
     println!("\n🌐 You can view your feed at:");
-    println!("   https://bsky.app/profile/{}/feed/{}", login_response.handle, record_name);
+    println!(
+        "   https://bsky.app/profile/{}/feed/{}",
+        login_response.handle, record_name
+    );
     println!("\nYou can now find and share your feed in the Bluesky app!");
 
     Ok(())

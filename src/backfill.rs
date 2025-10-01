@@ -2,9 +2,12 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use std::sync::Arc;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
-use crate::{database::Database, types::{Follow, Post}};
+use crate::{
+    database::Database,
+    types::{Follow, Post},
+};
 
 pub async fn backfill_follows(db: Arc<Database>, user_did: &str) -> Result<()> {
     info!("Starting backfill of follows for {}", user_did);
@@ -14,16 +17,15 @@ pub async fn backfill_follows(db: Arc<Database>, user_did: &str) -> Result<()> {
     let mut total_follows = 0;
 
     loop {
-        let mut url = format!("https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows?actor={}&limit=100", user_did);
+        let mut url = format!(
+            "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows?actor={}&limit=100",
+            user_did
+        );
         if let Some(ref c) = cursor {
             url.push_str(&format!("&cursor={}", c));
         }
 
-        let response: serde_json::Value = client.get(&url)
-            .send()
-            .await?
-            .json()
-            .await?;
+        let response: serde_json::Value = client.get(&url).send().await?.json().await?;
 
         let follows = response["follows"].as_array();
         if follows.is_none() {
@@ -37,7 +39,11 @@ pub async fn backfill_follows(db: Arc<Database>, user_did: &str) -> Result<()> {
             }
 
             let follow_record = Follow {
-                uri: format!("at://{}/app.bsky.graph.follow/{}", user_did, uuid::Uuid::new_v4()),
+                uri: format!(
+                    "at://{}/app.bsky.graph.follow/{}",
+                    user_did,
+                    uuid::Uuid::new_v4()
+                ),
                 follower_did: user_did.to_string(),
                 target_did: target_did.to_string(),
                 created_at: chrono::Utc::now(),
@@ -69,16 +75,15 @@ pub async fn backfill_posts(db: Arc<Database>, target_did: &str, limit: usize) -
     let mut fetched = 0;
 
     loop {
-        let mut url = format!("https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed?actor={}&limit=100", target_did);
+        let mut url = format!(
+            "https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed?actor={}&limit=100",
+            target_did
+        );
         if let Some(ref c) = cursor {
             url.push_str(&format!("&cursor={}", c));
         }
 
-        let response: serde_json::Value = client.get(&url)
-            .send()
-            .await?
-            .json()
-            .await?;
+        let response: serde_json::Value = client.get(&url).send().await?.json().await?;
 
         let feed = response["feed"].as_array();
         if feed.is_none() {
@@ -128,7 +133,10 @@ pub async fn backfill_posts(db: Arc<Database>, target_did: &str, limit: usize) -
 
             fetched += 1;
             if fetched >= limit {
-                debug!("Backfilled {} posts for {} (limit reached)", total_posts, target_did);
+                debug!(
+                    "Backfilled {} posts for {} (limit reached)",
+                    total_posts, target_did
+                );
                 return Ok(());
             }
         }
@@ -143,7 +151,11 @@ pub async fn backfill_posts(db: Arc<Database>, target_did: &str, limit: usize) -
     Ok(())
 }
 
-pub async fn backfill_posts_for_follows(db: Arc<Database>, user_did: &str, posts_per_user: usize) -> Result<()> {
+pub async fn backfill_posts_for_follows(
+    db: Arc<Database>,
+    user_did: &str,
+    posts_per_user: usize,
+) -> Result<()> {
     info!("Starting backfill of posts for {}'s follows", user_did);
 
     // Get all follows for this user
@@ -158,7 +170,12 @@ pub async fn backfill_posts_for_follows(db: Arc<Database>, user_did: &str, posts
     for (idx, row) in follows.iter().enumerate() {
         let target_did: String = row.try_get("target_did")?;
 
-        debug!("Backfilling posts from {} ({}/{})", target_did, idx + 1, total_follows);
+        debug!(
+            "Backfilling posts from {} ({}/{})",
+            target_did,
+            idx + 1,
+            total_follows
+        );
 
         if let Err(e) = backfill_posts(Arc::clone(&db), &target_did, posts_per_user).await {
             warn!("Failed to backfill posts from {}: {}", target_did, e);

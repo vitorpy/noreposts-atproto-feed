@@ -50,9 +50,7 @@ impl FollowingNoRepostsFeed {
             .collect();
 
         // Generate cursor for pagination (use created_at for chronological order)
-        let cursor = posts
-            .last()
-            .map(|post| post.created_at.to_rfc3339());
+        let cursor = posts.last().map(|post| post.created_at.to_rfc3339());
 
         Ok(FeedSkeletonResponse {
             cursor,

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use sqlx::{SqlitePool, Row};
+use sqlx::{Row, SqlitePool};
 
 use crate::types::{Follow, Post};
 
@@ -25,7 +25,7 @@ impl Database {
             r#"
             INSERT OR REPLACE INTO posts (uri, cid, author_did, text, created_at, indexed_at)
             VALUES (?, ?, ?, ?, ?, ?)
-            "#
+            "#,
         )
         .bind(&post.uri)
         .bind(&post.cid)
@@ -52,7 +52,7 @@ impl Database {
             r#"
             INSERT OR REPLACE INTO follows (uri, follower_did, target_did, created_at, indexed_at)
             VALUES (?, ?, ?, ?, ?)
-            "#
+            "#,
         )
         .bind(&follow.uri)
         .bind(&follow.follower_did)
@@ -93,7 +93,7 @@ impl Database {
                 AND p.created_at < ?
             ORDER BY p.created_at DESC
             LIMIT ?
-            "#
+            "#,
         )
         .bind(follower_did)
         .bind(cursor_time.to_rfc3339())
@@ -132,12 +132,16 @@ impl Database {
         Ok(())
     }
 
+    // Unused but kept for potential future use
+    #[allow(dead_code)]
     pub async fn is_following(&self, follower_did: &str, target_did: &str) -> Result<bool> {
-        let row = sqlx::query("SELECT COUNT(*) as count FROM follows WHERE follower_did = ? AND target_did = ?")
-            .bind(follower_did)
-            .bind(target_did)
-            .fetch_one(&self.pool)
-            .await?;
+        let row = sqlx::query(
+            "SELECT COUNT(*) as count FROM follows WHERE follower_did = ? AND target_did = ?",
+        )
+        .bind(follower_did)
+        .bind(target_did)
+        .fetch_one(&self.pool)
+        .await?;
 
         let count: i64 = row.try_get("count")?;
         Ok(count > 0)

@@ -55,7 +55,6 @@ pub struct Follow {
     pub indexed_at: DateTime<Utc>,
 }
 
-
 // JWT Claims
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JwtClaims {

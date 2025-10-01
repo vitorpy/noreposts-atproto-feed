@@ -3,7 +3,7 @@ use sqlx::Row;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use crate::{backfill, database::Database};
 
@@ -57,7 +57,9 @@ async fn handle_connection(stream: UnixStream, db: Arc<Database>) -> Result<()> 
     let mut line = String::new();
 
     writer.write_all(b"Feed Generator Admin Console\n").await?;
-    writer.write_all(b"Commands: backfill <did>, stats, help, quit\n> ").await?;
+    writer
+        .write_all(b"Commands: backfill <did>, stats, help, quit\n> ")
+        .await?;
     writer.flush().await?;
 
     loop {
@@ -77,19 +79,25 @@ async fn handle_connection(stream: UnixStream, db: Arc<Database>) -> Result<()> 
 
         let parts: Vec<&str> = command.split_whitespace().collect();
 
-        match parts.get(0).map(|s| *s) {
+        match parts.first().copied() {
             Some("backfill") => {
                 if let Some(did) = parts.get(1) {
-                    writer.write_all(format!("Starting backfill for {}...\n", did).as_bytes()).await?;
+                    writer
+                        .write_all(format!("Starting backfill for {}...\n", did).as_bytes())
+                        .await?;
                     writer.flush().await?;
 
                     // First backfill follows
                     match backfill::backfill_follows(Arc::clone(&db), did).await {
                         Ok(_) => {
-                            writer.write_all(b"Follows backfilled successfully\n").await?;
+                            writer
+                                .write_all(b"Follows backfilled successfully\n")
+                                .await?;
                         }
                         Err(e) => {
-                            writer.write_all(format!("Follow backfill failed: {}\n", e).as_bytes()).await?;
+                            writer
+                                .write_all(format!("Follow backfill failed: {}\n", e).as_bytes())
+                                .await?;
                             writer.write_all(b"> ").await?;
                             writer.flush().await?;
                             continue;
@@ -105,29 +113,39 @@ async fn handle_connection(stream: UnixStream, db: Arc<Database>) -> Result<()> 
                             writer.write_all(b"Posts backfilled successfully\n").await?;
                         }
                         Err(e) => {
-                            writer.write_all(format!("Post backfill failed: {}\n", e).as_bytes()).await?;
+                            writer
+                                .write_all(format!("Post backfill failed: {}\n", e).as_bytes())
+                                .await?;
                         }
                     }
                 } else {
                     writer.write_all(b"Usage: backfill <did>\n").await?;
                 }
             }
-            Some("stats") => {
-                match get_stats(&db).await {
-                    Ok(stats) => {
-                        writer.write_all(stats.as_bytes()).await?;
-                    }
-                    Err(e) => {
-                        writer.write_all(format!("Failed to get stats: {}\n", e).as_bytes()).await?;
-                    }
+            Some("stats") => match get_stats(&db).await {
+                Ok(stats) => {
+                    writer.write_all(stats.as_bytes()).await?;
                 }
-            }
+                Err(e) => {
+                    writer
+                        .write_all(format!("Failed to get stats: {}\n", e).as_bytes())
+                        .await?;
+                }
+            },
             Some("help") => {
                 writer.write_all(b"Available commands:\n").await?;
-                writer.write_all(b"  backfill <did>  - Backfill follows and posts for a user\n").await?;
-                writer.write_all(b"  stats           - Show database statistics\n").await?;
-                writer.write_all(b"  help            - Show this help message\n").await?;
-                writer.write_all(b"  quit            - Close connection\n").await?;
+                writer
+                    .write_all(b"  backfill <did>  - Backfill follows and posts for a user\n")
+                    .await?;
+                writer
+                    .write_all(b"  stats           - Show database statistics\n")
+                    .await?;
+                writer
+                    .write_all(b"  help            - Show this help message\n")
+                    .await?;
+                writer
+                    .write_all(b"  quit            - Close connection\n")
+                    .await?;
             }
             Some("quit") | Some("exit") => {
                 writer.write_all(b"Goodbye!\n").await?;
@@ -135,7 +153,15 @@ async fn handle_connection(stream: UnixStream, db: Arc<Database>) -> Result<()> 
                 break;
             }
             _ => {
-                writer.write_all(format!("Unknown command: {}. Type 'help' for available commands.\n", command).as_bytes()).await?;
+                writer
+                    .write_all(
+                        format!(
+                            "Unknown command: {}. Type 'help' for available commands.\n",
+                            command
+                        )
+                        .as_bytes(),
+                    )
+                    .await?;
             }
         }
 

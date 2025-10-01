@@ -8,7 +8,10 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 use url::Url;
 
-use crate::{database::Database, types::{Follow, Post}};
+use crate::{
+    database::Database,
+    types::{Follow, Post},
+};
 
 pub struct JetstreamEventHandler {
     db: Arc<Database>,
@@ -20,8 +23,12 @@ impl JetstreamEventHandler {
     }
 
     pub async fn start(&self, jetstream_hostname: String) -> Result<()> {
-        let wanted_collections = "wantedCollections=app.bsky.feed.post&wantedCollections=app.bsky.graph.follow";
-        let ws_url = format!("wss://{}/subscribe?{}", jetstream_hostname, wanted_collections);
+        let wanted_collections =
+            "wantedCollections=app.bsky.feed.post&wantedCollections=app.bsky.graph.follow";
+        let ws_url = format!(
+            "wss://{}/subscribe?{}",
+            jetstream_hostname, wanted_collections
+        );
 
         info!("Connecting to Jetstream at {}", ws_url);
 
@@ -50,7 +57,10 @@ impl JetstreamEventHandler {
                     }
                 }
                 Err(e) => {
-                    error!("Failed to connect to Jetstream: {}. Reconnecting in 5 seconds...", e);
+                    error!(
+                        "Failed to connect to Jetstream: {}. Reconnecting in 5 seconds...",
+                        e
+                    );
                 }
             }
 
@@ -63,8 +73,10 @@ impl JetstreamEventHandler {
 
         match event {
             JetstreamEvent::Commit { did, commit, .. } => {
-                info!("Received commit event: did={}, collection={}, operation={}",
-                      did, commit.collection, commit.operation);
+                info!(
+                    "Received commit event: did={}, collection={}, operation={}",
+                    did, commit.collection, commit.operation
+                );
 
                 match commit.collection.as_str() {
                     "app.bsky.feed.post" => {

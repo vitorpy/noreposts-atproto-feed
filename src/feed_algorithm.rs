@@ -42,6 +42,12 @@ impl FollowingNoRepostsFeed {
             .get_following_posts(&follower_did, limit, cursor.as_deref())
             .await?;
 
+        tracing::info!(
+            "Feed generated for {}: found {} posts from followed accounts",
+            follower_did,
+            posts.len()
+        );
+
         let feed_posts: Vec<SkeletonFeedPost> = posts
             .iter()
             .map(|post| SkeletonFeedPost {

@@ -34,13 +34,17 @@ impl JetstreamEventHandler {
             require_hello: false,
         };
 
+        info!("Jetstream config: compression={}, collections={:?}, require_hello={}",
+              config.compression, config.collections, config.require_hello);
+
         let consumer = Consumer::new(config);
-        info!("Registering event handler...");
+        info!("Consumer created, registering event handler...");
         consumer.register_handler(Arc::new(self.clone())).await?;
+        info!("Event handler registered successfully");
 
         let cancellation_token = CancellationToken::new();
         info!("Starting Jetstream consumer background task...");
-        
+
         // Start cleanup task
         let db_cleanup = Arc::clone(&self.db);
         tokio::spawn(async move {
@@ -53,7 +57,9 @@ impl JetstreamEventHandler {
             }
         });
 
+        info!("Calling consumer.run_background()...");
         consumer.run_background(cancellation_token).await?;
+        info!("Consumer.run_background() returned");
         Ok(())
     }
 }
@@ -69,17 +75,33 @@ impl Clone for JetstreamEventHandler {
 #[async_trait]
 impl EventHandler for JetstreamEventHandler {
     async fn handle_event(&self, event: JetstreamEvent) -> anyhow::Result<()> {
-        if let JetstreamEvent::Commit { did, time_us: _, kind: _, commit } = event {
-            match commit.collection.as_str() {
-                "app.bsky.feed.post" => {
-                    debug!("Received post event from {}", did);
-                    self.handle_post_event(&did, &commit.collection, &commit.rkey, &commit.operation, Some(&commit.record), &commit.cid).await?;
+        match event {
+            JetstreamEvent::Commit { did, time_us: _, kind, commit } => {
+                info!("EVENT RECEIVED - Commit: did={}, kind={:?}, collection={}, operation={}",
+                      did, kind, commit.collection, commit.operation);
+
+                match commit.collection.as_str() {
+                    "app.bsky.feed.post" => {
+                        info!("Processing post event from {}", did);
+                        self.handle_post_event(&did, &commit.collection, &commit.rkey, &commit.operation, Some(&commit.record), &commit.cid).await?;
+                    }
+                    "app.bsky.graph.follow" => {
+                        info!("Processing follow event: {} -> target", did);
+                        self.handle_follow_event(&did, &commit.collection, &commit.rkey, &commit.operation, Some(&commit.record)).await?;
+                    }
+                    _ => {
+                        info!("Ignoring collection: {}", commit.collection);
+                    }
                 }
-                "app.bsky.graph.follow" => {
-                    info!("Received follow event: {} -> target", did);
-                    self.handle_follow_event(&did, &commit.collection, &commit.rkey, &commit.operation, Some(&commit.record)).await?;
-                }
-                _ => {} // Ignore other collections
+            }
+            JetstreamEvent::Account { did, kind, account, .. } => {
+                info!("EVENT RECEIVED - Account: did={}, kind={:?}", did, kind);
+            }
+            JetstreamEvent::Identity { did, kind, identity, .. } => {
+                info!("EVENT RECEIVED - Identity: did={}, kind={:?}", did, kind);
+            }
+            JetstreamEvent::Delete { did, kind, .. } => {
+                info!("EVENT RECEIVED - Delete: did={}, kind={:?}", did, kind);
             }
         }
         Ok(())

@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Read(//home/vitorpy/code/vitorpy.com/**)"
+      "Read(//home/vitorpy/code/vitorpy.com/**)",
+      "Bash(gh issue view:*)"
     ],
     "deny": [],
     "ask": []

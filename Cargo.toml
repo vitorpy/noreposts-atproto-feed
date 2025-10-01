@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # WebSocket for Jetstream
-tokio-tungstenite = { version = "0.18", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 futures = "0.3"
 url = "2.3"
 

@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
-use url::Url;
 
 use crate::{
     database::Database,
@@ -33,7 +32,7 @@ impl JetstreamEventHandler {
         info!("Connecting to Jetstream at {}", ws_url);
 
         loop {
-            match tokio_tungstenite::connect_async(Url::parse(&ws_url)?).await {
+            match tokio_tungstenite::connect_async(&ws_url).await {
                 Ok((mut socket, _response)) => {
                     info!("Connected to Jetstream successfully");
 

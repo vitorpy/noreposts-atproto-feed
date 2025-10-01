@@ -13,6 +13,7 @@ use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
+mod admin_socket;
 mod auth;
 mod backfill;
 mod database;
@@ -22,6 +23,7 @@ mod publish;
 mod types;
 
 use crate::{
+    admin_socket::AdminSocket,
     auth::validate_jwt,
     database::Database,
     feed_algorithm::FollowingNoRepostsFeed,
@@ -50,6 +52,9 @@ struct Args {
 
     #[arg(long, env = "JETSTREAM_HOSTNAME", default_value = "jetstream1.us-east.bsky.network")]
     jetstream_hostname: String,
+
+    #[arg(long, env = "ADMIN_SOCKET", default_value = "/var/run/noreposts-feed.sock")]
+    admin_socket: String,
 }
 
 #[derive(Parser)]
@@ -91,6 +96,14 @@ async fn main() -> Result<()> {
         db: Arc::clone(&db),
         service_did: service_did.clone(),
     };
+
+    // Start admin socket
+    let admin_socket = AdminSocket::new(Arc::clone(&db), args.admin_socket.clone());
+    tokio::spawn(async move {
+        if let Err(e) = admin_socket.start().await {
+            warn!("Admin socket error: {}", e);
+        }
+    });
 
     // Start Jetstream consumer with automatic reconnection
     let event_handler = JetstreamEventHandler::new(Arc::clone(&db));

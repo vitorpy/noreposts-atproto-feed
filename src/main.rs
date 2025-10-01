@@ -105,6 +105,18 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Start cleanup task
+    let db_cleanup = Arc::clone(&db);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // Every hour
+        loop {
+            interval.tick().await;
+            if let Err(e) = db_cleanup.cleanup_old_posts(48).await {
+                warn!("Failed to cleanup old posts: {}", e);
+            }
+        }
+    });
+
     // Start Jetstream consumer with automatic reconnection
     let event_handler = JetstreamEventHandler::new(Arc::clone(&db));
     let jetstream_hostname = args.jetstream_hostname.clone();

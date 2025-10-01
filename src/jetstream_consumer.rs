@@ -1,9 +1,12 @@
 use anyhow::Result;
-use atproto_jetstream::{Consumer, ConsumerTaskConfig, EventHandler, JetstreamEvent, CancellationToken};
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{error, warn, info, debug};
+use std::time::Duration;
+use tokio_tungstenite::tungstenite::Message;
+use tracing::{error, info, warn};
+use url::Url;
 
 use crate::{database::Database, types::{Follow, Post}};
 
@@ -17,116 +20,79 @@ impl JetstreamEventHandler {
     }
 
     pub async fn start(&self, jetstream_hostname: String) -> Result<()> {
-        info!("Starting Jetstream consumer, connecting to {}", jetstream_hostname);
+        let wanted_collections = "wantedCollections=app.bsky.feed.post&wantedCollections=app.bsky.graph.follow";
+        let ws_url = format!("wss://{}/subscribe?{}", jetstream_hostname, wanted_collections);
 
-        let config = ConsumerTaskConfig {
-            user_agent: "following-no-reposts-feed/1.0".to_string(),
-            compression: true,
-            jetstream_hostname: jetstream_hostname.clone(),
-            zstd_dictionary_location: String::new(),
-            collections: vec![
-                "app.bsky.feed.post".to_string(),
-                "app.bsky.graph.follow".to_string(),
-            ],
-            dids: vec![],
-            cursor: None,
-            max_message_size_bytes: None,
-            require_hello: false,
-        };
+        info!("Connecting to Jetstream at {}", ws_url);
 
-        info!("Jetstream config: compression={}, collections={:?}, require_hello={}",
-              config.compression, config.collections, config.require_hello);
+        loop {
+            match tokio_tungstenite::connect_async(Url::parse(&ws_url)?).await {
+                Ok((mut socket, _response)) => {
+                    info!("Connected to Jetstream successfully");
 
-        let consumer = Consumer::new(config);
-        info!("Consumer created, registering event handler...");
-        consumer.register_handler(Arc::new(self.clone())).await?;
-        info!("Event handler registered successfully");
-
-        let cancellation_token = CancellationToken::new();
-        info!("Starting Jetstream consumer background task...");
-
-        // Start cleanup task
-        let db_cleanup = Arc::clone(&self.db);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // Every hour
-            loop {
-                interval.tick().await;
-                if let Err(e) = db_cleanup.cleanup_old_posts(48).await {
-                    warn!("Failed to cleanup old posts: {}", e);
+                    while let Some(msg) = socket.next().await {
+                        match msg {
+                            Ok(Message::Text(text)) => {
+                                if let Err(e) = self.handle_message(&text).await {
+                                    error!("Error handling message: {}", e);
+                                }
+                            }
+                            Ok(Message::Close(_)) => {
+                                warn!("Jetstream connection closed");
+                                break;
+                            }
+                            Err(e) => {
+                                error!("WebSocket error: {}", e);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to connect to Jetstream: {}. Reconnecting in 5 seconds...", e);
                 }
             }
-        });
 
-        info!("Calling consumer.run_background()...");
-        consumer.run_background(cancellation_token).await?;
-        info!("Consumer.run_background() returned");
-        Ok(())
-    }
-}
-
-impl Clone for JetstreamEventHandler {
-    fn clone(&self) -> Self {
-        Self {
-            db: Arc::clone(&self.db),
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
-}
 
-#[async_trait]
-impl EventHandler for JetstreamEventHandler {
-    async fn handle_event(&self, event: JetstreamEvent) -> anyhow::Result<()> {
+    async fn handle_message(&self, message: &str) -> Result<()> {
+        let event: JetstreamEvent = serde_json::from_str(message)?;
+
         match event {
-            JetstreamEvent::Commit { did, time_us: _, kind, commit } => {
-                info!("EVENT RECEIVED - Commit: did={}, kind={:?}, collection={}, operation={}",
-                      did, kind, commit.collection, commit.operation);
+            JetstreamEvent::Commit { did, commit, .. } => {
+                info!("Received commit event: did={}, collection={}, operation={}",
+                      did, commit.collection, commit.operation);
 
                 match commit.collection.as_str() {
                     "app.bsky.feed.post" => {
-                        info!("Processing post event from {}", did);
-                        self.handle_post_event(&did, &commit.collection, &commit.rkey, &commit.operation, Some(&commit.record), &commit.cid).await?;
+                        self.handle_post_event(&did, &commit).await?;
                     }
                     "app.bsky.graph.follow" => {
-                        info!("Processing follow event: {} -> target", did);
-                        self.handle_follow_event(&did, &commit.collection, &commit.rkey, &commit.operation, Some(&commit.record)).await?;
+                        self.handle_follow_event(&did, &commit).await?;
                     }
-                    _ => {
-                        info!("Ignoring collection: {}", commit.collection);
-                    }
+                    _ => {}
                 }
             }
-            JetstreamEvent::Account { did, kind, account, .. } => {
-                info!("EVENT RECEIVED - Account: did={}, kind={:?}", did, kind);
+            JetstreamEvent::Account { did, .. } => {
+                info!("Received account event: did={}", did);
             }
-            JetstreamEvent::Identity { did, kind, identity, .. } => {
-                info!("EVENT RECEIVED - Identity: did={}, kind={:?}", did, kind);
-            }
-            JetstreamEvent::Delete { did, kind, .. } => {
-                info!("EVENT RECEIVED - Delete: did={}, kind={:?}", did, kind);
+            JetstreamEvent::Identity { did, .. } => {
+                info!("Received identity event: did={}", did);
             }
         }
+
         Ok(())
     }
 
-    fn handler_id(&self) -> String {
-        "following-no-reposts-handler".to_string()
-    }
-}
+    async fn handle_post_event(&self, did: &str, commit: &JetstreamCommit) -> Result<()> {
+        let uri = format!("at://{}/{}/{}", did, commit.collection, commit.rkey);
 
-impl JetstreamEventHandler {
-    async fn handle_post_event(
-        &self,
-        did: &str,
-        collection: &str,
-        rkey: &str,
-        operation: &str,
-        record: Option<&serde_json::Value>,
-        cid: &str,
-    ) -> Result<()> {
-        let uri = format!("at://{}/{}/{}", did, collection, rkey);
-
-        match operation {
+        match commit.operation.as_str() {
             "create" => {
-                if let Some(record) = record {
+                if let Some(record) = &commit.record {
                     // Check if this is a repost by looking for a "subject" field
                     if record.get("subject").is_some() {
                         // This is a repost, skip it
@@ -148,9 +114,11 @@ impl JetstreamEventHandler {
                         .unwrap_or_else(|_| Utc::now().into())
                         .with_timezone(&Utc);
 
+                    let cid = commit.cid.as_ref().unwrap_or(&String::new()).clone();
+
                     let post = Post {
                         uri: uri.clone(),
-                        cid: cid.to_string(),
+                        cid,
                         author_did: did.to_string(),
                         text: text.clone(),
                         created_at,
@@ -160,7 +128,7 @@ impl JetstreamEventHandler {
                     if let Err(e) = self.db.insert_post(&post).await {
                         error!("Failed to insert post: {}", e);
                     } else {
-                        debug!("Inserted post: {} by {}", uri, did);
+                        info!("Inserted post: {} by {}", uri, did);
                     }
                 }
             }
@@ -175,19 +143,12 @@ impl JetstreamEventHandler {
         Ok(())
     }
 
-    async fn handle_follow_event(
-        &self,
-        did: &str,
-        collection: &str,
-        rkey: &str,
-        operation: &str,
-        record: Option<&serde_json::Value>,
-    ) -> Result<()> {
-        let uri = format!("at://{}/{}/{}", did, collection, rkey);
+    async fn handle_follow_event(&self, did: &str, commit: &JetstreamCommit) -> Result<()> {
+        let uri = format!("at://{}/{}/{}", did, commit.collection, commit.rkey);
 
-        match operation {
+        match commit.operation.as_str() {
             "create" => {
-                if let Some(record) = record {
+                if let Some(record) = &commit.record {
                     let target_did = record
                         .get("subject")
                         .and_then(|v| v.as_str())
@@ -228,4 +189,47 @@ impl JetstreamEventHandler {
 
         Ok(())
     }
+}
+
+impl Clone for JetstreamEventHandler {
+    fn clone(&self) -> Self {
+        Self {
+            db: Arc::clone(&self.db),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "kind")]
+enum JetstreamEvent {
+    #[serde(rename = "commit")]
+    Commit {
+        did: String,
+        time_us: i64,
+        commit: JetstreamCommit,
+    },
+    #[serde(rename = "account")]
+    Account {
+        did: String,
+        time_us: i64,
+        account: serde_json::Value,
+    },
+    #[serde(rename = "identity")]
+    Identity {
+        did: String,
+        time_us: i64,
+        identity: serde_json::Value,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct JetstreamCommit {
+    rev: String,
+    operation: String,
+    collection: String,
+    rkey: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    record: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cid: Option<String>,
 }

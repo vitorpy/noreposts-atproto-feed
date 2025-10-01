@@ -223,7 +223,9 @@ curl "http://localhost:3000/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://your-di
 
 ## License
 
-MIT License - see LICENSE file for details.
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+
+This ensures the code remains free and open source.
 
 ## Contributing
 

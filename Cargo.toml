@@ -16,7 +16,7 @@ atrium-crypto = "0.1"
 atrium-common = "0.1"
 
 # Web server
-axum = "0.7"
+axum = "0.8"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 

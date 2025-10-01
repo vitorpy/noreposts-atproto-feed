@@ -10,8 +10,10 @@ futures = "0.3"
 url = "2.3"
 
 # AT Protocol libraries
-atrium-api = "0.1"
-atrium-xrpc-client = "0.1"
+atrium-xrpc-client = "0.5"
+atrium-identity = "0.1"
+atrium-crypto = "0.1"
+atrium-common = "0.1"
 
 # Web server
 axum = "0.7"
@@ -45,3 +47,9 @@ reqwest = { version = "0.11", features = ["json"] }
 
 # Environment
 dotenvy = "0.15"
+
+# Caching
+moka = { version = "0.12", features = ["future"] }
+
+# Encoding
+base64 = "0.22"

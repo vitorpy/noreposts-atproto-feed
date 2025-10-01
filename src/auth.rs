@@ -1,5 +1,11 @@
 use anyhow::{anyhow, Result};
+use atrium_common::resolver::Resolver;
+use atrium_crypto::did::{format_did_key, parse_multikey};
+use atrium_identity::did::{CommonDidResolver, CommonDidResolverConfig, DEFAULT_PLC_DIRECTORY_URL};
+use atrium_xrpc_client::reqwest::ReqwestClient;
+use base64::Engine;
 use jwt_compact::UntrustedToken;
+use std::sync::Arc;
 use tracing::{debug, warn};
 
 use crate::types::JwtClaims;
@@ -18,7 +24,69 @@ use crate::types::JwtClaims;
 //     expiration: Option<i64>,
 // }
 
-pub fn validate_jwt(token: &str, service_did: &str) -> Result<JwtClaims> {
+/// Resolves a DID and extracts the atproto signing key as a did:key string
+async fn resolve_signing_key(
+    resolver: &CommonDidResolver<ReqwestClient>,
+    did_str: &str,
+) -> Result<String> {
+    debug!("Resolving DID: {}", did_str);
+
+    // Convert string to Did type
+    let did = did_str.parse().map_err(|e| {
+        warn!("Invalid DID format: {}", e);
+        anyhow!("Invalid DID format: {}", e)
+    })?;
+
+    // Resolve the DID document
+    let did_doc = resolver.resolve(&did).await.map_err(|e| {
+        warn!("Failed to resolve DID {}: {}", did_str, e);
+        anyhow!("Failed to resolve DID: {}", e)
+    })?;
+
+    debug!("DID document resolved: {:?}", did_doc);
+
+    // Use the built-in helper to get the signing key
+    let verification_method = did_doc.get_signing_key().ok_or_else(|| {
+        warn!("No atproto verification method found in DID document");
+        anyhow!("No atproto signing key found in DID document")
+    })?;
+
+    debug!("Found verification method: {:?}", verification_method);
+
+    // Extract publicKeyMultibase
+    let public_key_multibase = verification_method
+        .public_key_multibase
+        .as_ref()
+        .ok_or_else(|| {
+            warn!("Verification method missing publicKeyMultibase");
+            anyhow!("Missing publicKeyMultibase in verification method")
+        })?;
+
+    debug!("Public key multibase: {}", public_key_multibase);
+
+    // Parse the multibase-encoded key
+    let (algorithm, key_bytes) = parse_multikey(public_key_multibase).map_err(|e| {
+        warn!("Failed to parse multikey: {}", e);
+        anyhow!("Invalid publicKeyMultibase format: {}", e)
+    })?;
+
+    debug!(
+        "Parsed key: algorithm={:?}, key_len={}",
+        algorithm,
+        key_bytes.len()
+    );
+
+    // Format as did:key
+    let did_key = format_did_key(algorithm, &key_bytes).map_err(|e| {
+        warn!("Failed to format did:key: {}", e);
+        anyhow!("Failed to convert key to did:key format: {}", e)
+    })?;
+
+    debug!("Formatted did:key: {}", did_key);
+    Ok(did_key)
+}
+
+pub async fn validate_jwt(token: &str, service_did: &str) -> Result<JwtClaims> {
     // Token should already have "Bearer " prefix stripped by caller
     debug!("Validating JWT token (length: {})", token.len());
     debug!("Expected audience: {}", service_did);
@@ -86,46 +154,47 @@ pub fn validate_jwt(token: &str, service_did: &str) -> Result<JwtClaims> {
         return Err(anyhow!("JWT has expired"));
     }
 
-    // TODO: In production, we should:
-    // 1. Fetch the user's DID document from iss
-    // 2. Extract their public key
-    // 3. Verify the signature with Es256k::verify()
-    // For now, we skip signature verification but validate structure and claims
+    // Verify signature
+    debug!("Verifying JWT signature for issuer: {}", iss);
 
-    debug!("JWT validated successfully for issuer: {}", iss);
+    // Create DID resolver
+    // Note: base_uri is not used for DID resolution, so we use a placeholder
+    let http_client = ReqwestClient::new("https://plc.directory");
+    let resolver_config = CommonDidResolverConfig {
+        plc_directory_url: DEFAULT_PLC_DIRECTORY_URL.to_string(),
+        http_client: Arc::new(http_client),
+    };
+    let resolver = CommonDidResolver::new(resolver_config);
+
+    // Resolve the issuer's signing key
+    let did_key = resolve_signing_key(&resolver, &iss).await?;
+
+    // Extract the signed portion of the JWT (header.payload)
+    // JWT format is: header.payload.signature
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        warn!("Invalid JWT format: expected 3 parts, got {}", parts.len());
+        return Err(anyhow!("Invalid JWT format"));
+    }
+
+    let signed_data = format!("{}.{}", parts[0], parts[1]);
+    let signature_b64 = parts[2];
+
+    // Decode the base64url signature
+    let signature_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(signature_b64)
+        .map_err(|e| {
+            warn!("Failed to decode JWT signature: {}", e);
+            anyhow!("Invalid JWT signature encoding: {}", e)
+        })?;
+
+    // Verify the signature
+    atrium_crypto::verify::verify_signature(&did_key, signed_data.as_bytes(), &signature_bytes)
+        .map_err(|e| {
+            warn!("JWT signature verification failed: {}", e);
+            anyhow!("Invalid JWT signature: {}", e)
+        })?;
+
+    debug!("JWT signature verified successfully for issuer: {}", iss);
     Ok(JwtClaims { iss, aud, exp })
 }
-
-// Production implementation would need this:
-/*
-pub async fn validate_jwt_production(auth_header: &str, service_did: &str) -> Result<JwtClaims> {
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| anyhow!("Invalid authorization header format"))?;
-
-    // 1. Decode JWT header to get the signing key ID
-    let header = decode_header(token)?;
-
-    // 2. Extract issuer DID from token payload (without verification)
-    let mut validation = Validation::new(Algorithm::ES256K);
-    validation.insecure_disable_signature_validation();
-    let temp_decode = decode::<JwtClaims>(token, &DecodingKey::from_secret(b"temp"), &validation)?;
-    let issuer_did = temp_decode.claims.iss;
-
-    // 3. Fetch DID document for the issuer
-    let did_doc = fetch_did_document(&issuer_did).await?;
-
-    // 4. Extract the appropriate verification key
-    let verification_key = extract_verification_key(&did_doc, &header.kid)?;
-
-    // 5. Validate the JWT with the real key
-    let mut validation = Validation::new(Algorithm::ES256K);
-    validation.validate_exp = true;
-    validation.set_audience(&[service_did]);
-
-    let decoding_key = DecodingKey::from_ec_pem(&verification_key)?;
-    let token_data = decode::<JwtClaims>(token, &decoding_key, &validation)?;
-
-    Ok(token_data.claims)
-}
-*/

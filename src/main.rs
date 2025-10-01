@@ -223,7 +223,7 @@ async fn get_feed_skeleton(
     let token = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
 
     info!("Validating JWT for request");
-    let requester_did = match validate_jwt(token, &state.service_did) {
+    let requester_did = match validate_jwt(token, &state.service_did).await {
         Ok(claims) => {
             info!("Authenticated request from DID: {}", claims.iss);
             claims.iss

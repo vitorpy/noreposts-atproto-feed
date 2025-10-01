@@ -146,6 +146,8 @@ impl JetstreamEventHandler {
             "delete" => {
                 if let Err(e) = self.db.delete_post(&uri).await {
                     error!("Failed to delete post: {}", e);
+                } else {
+                    info!("Deleted post: {}", uri);
                 }
             }
             _ => {} // Ignore updates
@@ -193,6 +195,8 @@ impl JetstreamEventHandler {
             "delete" => {
                 if let Err(e) = self.db.delete_follow(&uri).await {
                     error!("Failed to delete follow: {}", e);
+                } else {
+                    info!("Deleted follow: {}", uri);
                 }
             }
             _ => {} // Ignore updates

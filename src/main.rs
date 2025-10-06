@@ -16,6 +16,7 @@ use tracing::{info, warn};
 mod admin_socket;
 mod auth;
 mod backfill;
+mod cleanup;
 mod database;
 mod feed_algorithm;
 mod jetstream_consumer;
@@ -110,14 +111,26 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Start cleanup task
+    // Start cleanup task - runs every 5 minutes
     let db_cleanup = Arc::clone(&db);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // Every hour
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // Every 5 minutes
         loop {
             interval.tick().await;
+
+            // Clean up old posts (older than 48 hours)
             if let Err(e) = db_cleanup.cleanup_old_posts(48).await {
                 warn!("Failed to cleanup old posts: {}", e);
+            }
+
+            // Clean up old follows (older than 48 hours)
+            if let Err(e) = db_cleanup.cleanup_old_follows(48).await {
+                warn!("Failed to cleanup old follows: {}", e);
+            }
+
+            // Verify follows against API and remove stale ones
+            if let Err(e) = cleanup::verify_all_follows(Arc::clone(&db_cleanup)).await {
+                warn!("Failed to verify follows: {}", e);
             }
         }
     });

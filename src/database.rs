@@ -125,10 +125,84 @@ impl Database {
 
     pub async fn cleanup_old_posts(&self, hours: i64) -> Result<()> {
         let cutoff = Utc::now() - chrono::Duration::hours(hours);
-        sqlx::query("DELETE FROM posts WHERE indexed_at < ?")
+        let result = sqlx::query("DELETE FROM posts WHERE indexed_at < ?")
             .bind(cutoff.to_rfc3339())
             .execute(&self.pool)
             .await?;
+
+        let deleted = result.rows_affected();
+        if deleted > 0 {
+            tracing::info!("Cleaned up {} posts older than {} hours", deleted, hours);
+        }
+        Ok(())
+    }
+
+    pub async fn cleanup_old_follows(&self, hours: i64) -> Result<()> {
+        let cutoff = Utc::now() - chrono::Duration::hours(hours);
+        let result = sqlx::query("DELETE FROM follows WHERE indexed_at < ?")
+            .bind(cutoff.to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+
+        let deleted = result.rows_affected();
+        if deleted > 0 {
+            tracing::info!("Cleaned up {} follows older than {} hours", deleted, hours);
+        }
+        Ok(())
+    }
+
+    pub async fn get_all_follower_dids(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT DISTINCT follower_did FROM follows")
+            .fetch_all(&self.pool)
+            .await?;
+
+        let dids: Vec<String> = rows
+            .into_iter()
+            .filter_map(|row| row.try_get("follower_did").ok())
+            .collect();
+
+        Ok(dids)
+    }
+
+    pub async fn sync_follows_for_user(
+        &self,
+        user_did: &str,
+        current_target_dids: Vec<String>,
+    ) -> Result<()> {
+        // Get all follows for this user in our database
+        let rows = sqlx::query("SELECT target_did FROM follows WHERE follower_did = ?")
+            .bind(user_did)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let db_target_dids: Vec<String> = rows
+            .into_iter()
+            .filter_map(|row| row.try_get("target_did").ok())
+            .collect();
+
+        // Find follows in database that no longer exist in current follows
+        let mut removed_count = 0;
+        for db_target in &db_target_dids {
+            if !current_target_dids.contains(db_target) {
+                // This follow no longer exists, remove it
+                sqlx::query("DELETE FROM follows WHERE follower_did = ? AND target_did = ?")
+                    .bind(user_did)
+                    .bind(db_target)
+                    .execute(&self.pool)
+                    .await?;
+                removed_count += 1;
+                tracing::info!("Removed stale follow: {} -> {}", user_did, db_target);
+            }
+        }
+
+        if removed_count > 0 {
+            tracing::info!(
+                "Cleaned up {} stale follows for {}",
+                removed_count,
+                user_did
+            );
+        }
+
         Ok(())
     }
 

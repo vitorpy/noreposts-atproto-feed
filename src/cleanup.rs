@@ -4,24 +4,33 @@ use tracing::{info, warn};
 
 use crate::database::Database;
 
-pub async fn verify_all_follows(db: Arc<Database>) -> Result<()> {
-    info!("Starting follow verification cleanup");
+pub async fn verify_active_user_follows(db: Arc<Database>) -> Result<()> {
+    info!("Starting follow verification for active users");
 
-    let follower_dids = db.get_all_follower_dids().await?;
-    info!("Verifying follows for {} users", follower_dids.len());
+    // Only verify follows for users who have accessed the feed in the last 7 days
+    let active_users = db.get_active_users(7).await?;
+    info!("Verifying follows for {} active users", active_users.len());
 
     let client = reqwest::Client::new();
 
-    for follower_did in follower_dids {
-        match verify_follows_for_user(&client, Arc::clone(&db), &follower_did).await {
-            Ok(_) => {}
+    for user_did in active_users {
+        match verify_follows_for_user(&client, Arc::clone(&db), &user_did).await {
+            Ok(_) => {
+                // Record that we synced this user's follows
+                if let Err(e) = db.update_follow_sync(&user_did).await {
+                    warn!(
+                        "Failed to update follow sync timestamp for {}: {}",
+                        user_did, e
+                    );
+                }
+            }
             Err(e) => {
-                warn!("Failed to verify follows for {}: {}", follower_did, e);
+                warn!("Failed to verify follows for {}: {}", user_did, e);
             }
         }
     }
 
-    info!("Follow verification cleanup completed");
+    info!("Follow verification completed");
     Ok(())
 }
 

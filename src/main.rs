@@ -128,9 +128,9 @@ async fn main() -> Result<()> {
                 warn!("Failed to cleanup old follows: {}", e);
             }
 
-            // Verify follows against API and remove stale ones
-            if let Err(e) = cleanup::verify_all_follows(Arc::clone(&db_cleanup)).await {
-                warn!("Failed to verify follows: {}", e);
+            // Verify follows for active users (accessed feed in last 7 days)
+            if let Err(e) = cleanup::verify_active_user_follows(Arc::clone(&db_cleanup)).await {
+                warn!("Failed to verify active user follows: {}", e);
             }
         }
     });
@@ -296,6 +296,11 @@ async fn get_feed_skeleton(
         }
     });
 
+    // Record that this user accessed the feed
+    if let Err(e) = state.db.record_feed_request(&requester_did).await {
+        warn!("Failed to record feed request for {}: {}", requester_did, e);
+    }
+
     let feed_algorithm = FollowingNoRepostsFeed::new(Arc::clone(&state.db));
 
     info!(
@@ -304,7 +309,7 @@ async fn get_feed_skeleton(
     );
 
     match feed_algorithm
-        .generate_feed(Some(requester_did), params.limit, params.cursor)
+        .generate_feed(Some(requester_did.clone()), params.limit, params.cursor)
         .await
     {
         Ok(response) => {

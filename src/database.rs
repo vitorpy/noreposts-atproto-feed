@@ -151,17 +151,45 @@ impl Database {
         Ok(())
     }
 
-    pub async fn get_all_follower_dids(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query("SELECT DISTINCT follower_did FROM follows")
-            .fetch_all(&self.pool)
-            .await?;
+    pub async fn record_feed_request(&self, user_did: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO active_users (did, last_feed_request)
+            VALUES (?, ?)
+            ON CONFLICT(did) DO UPDATE SET last_feed_request = excluded.last_feed_request
+            "#,
+        )
+        .bind(user_did)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_active_users(&self, days: i64) -> Result<Vec<String>> {
+        let cutoff = Utc::now() - chrono::Duration::days(days);
+        let rows = sqlx::query(
+            "SELECT did FROM active_users WHERE last_feed_request > ? ORDER BY last_feed_request DESC"
+        )
+        .bind(cutoff.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await?;
 
         let dids: Vec<String> = rows
             .into_iter()
-            .filter_map(|row| row.try_get("follower_did").ok())
+            .filter_map(|row| row.try_get("did").ok())
             .collect();
 
         Ok(dids)
+    }
+
+    pub async fn update_follow_sync(&self, user_did: &str) -> Result<()> {
+        sqlx::query("UPDATE active_users SET last_follow_sync = ? WHERE did = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(user_did)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn sync_follows_for_user(

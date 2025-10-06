@@ -11,6 +11,17 @@ pub struct Database {
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self> {
         let pool = SqlitePool::connect(database_url).await?;
+
+        // Enable WAL mode for better concurrency
+        sqlx::query("PRAGMA journal_mode=WAL;")
+            .execute(&pool)
+            .await?;
+
+        // Set busy timeout to 5 seconds
+        sqlx::query("PRAGMA busy_timeout=5000;")
+            .execute(&pool)
+            .await?;
+
         Ok(Self { pool })
     }
 

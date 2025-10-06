@@ -148,20 +148,6 @@ impl Database {
         Ok(())
     }
 
-    pub async fn cleanup_old_follows(&self, hours: i64) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::hours(hours);
-        let result = sqlx::query("DELETE FROM follows WHERE indexed_at < ?")
-            .bind(cutoff.to_rfc3339())
-            .execute(&self.pool)
-            .await?;
-
-        let deleted = result.rows_affected();
-        if deleted > 0 {
-            tracing::info!("Cleaned up {} follows older than {} hours", deleted, hours);
-        }
-        Ok(())
-    }
-
     pub async fn record_feed_request(&self, user_did: &str) -> Result<()> {
         sqlx::query(
             r#"

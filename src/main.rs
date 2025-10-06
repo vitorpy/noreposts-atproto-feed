@@ -123,12 +123,8 @@ async fn main() -> Result<()> {
                 warn!("Failed to cleanup old posts: {}", e);
             }
 
-            // Clean up old follows (older than 48 hours)
-            if let Err(e) = db_cleanup.cleanup_old_follows(48).await {
-                warn!("Failed to cleanup old follows: {}", e);
-            }
-
             // Verify follows for active users (accessed feed in last 7 days)
+            // This removes follows that no longer exist in the user's actual follow list
             if let Err(e) = cleanup::verify_active_user_follows(Arc::clone(&db_cleanup)).await {
                 warn!("Failed to verify active user follows: {}", e);
             }

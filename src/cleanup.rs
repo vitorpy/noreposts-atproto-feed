@@ -34,6 +34,46 @@ pub async fn verify_active_user_follows(db: Arc<Database>) -> Result<()> {
     Ok(())
 }
 
+pub async fn cleanup_inactive_user_follows(db: Arc<Database>) -> Result<()> {
+    info!("Starting cleanup of follows for inactive users");
+
+    // Get all unique follower DIDs from the follows table
+    let all_follower_dids: Vec<String> = sqlx::query("SELECT DISTINCT follower_did FROM follows")
+        .fetch_all(&db.pool)
+        .await?
+        .into_iter()
+        .filter_map(|row| row.try_get("follower_did").ok())
+        .collect();
+
+    info!("Found {} unique users with follows", all_follower_dids.len());
+
+    // Get active users (accessed feed in last 7 days)
+    let active_users = db.get_active_users(7).await?;
+    let active_user_set: std::collections::HashSet<String> =
+        active_users.into_iter().collect();
+
+    // Delete follows for users who are not active
+    let mut deleted_count = 0;
+    for follower_did in all_follower_dids {
+        if !active_user_set.contains(&follower_did) {
+            let result = sqlx::query("DELETE FROM follows WHERE follower_did = ?")
+                .bind(&follower_did)
+                .execute(&db.pool)
+                .await?;
+
+            deleted_count += result.rows_affected();
+        }
+    }
+
+    if deleted_count > 0 {
+        info!("Cleaned up {} follows from inactive users", deleted_count);
+    } else {
+        info!("No inactive user follows to clean up");
+    }
+
+    Ok(())
+}
+
 async fn verify_follows_for_user(
     client: &reqwest::Client,
     db: Arc<Database>,

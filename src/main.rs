@@ -128,6 +128,12 @@ async fn main() -> Result<()> {
             if let Err(e) = cleanup::verify_active_user_follows(Arc::clone(&db_cleanup)).await {
                 warn!("Failed to verify active user follows: {}", e);
             }
+
+            // Clean up follows for users who haven't accessed the feed
+            // This removes all follow data for users not in the active_users table
+            if let Err(e) = cleanup::cleanup_inactive_user_follows(Arc::clone(&db_cleanup)).await {
+                warn!("Failed to cleanup inactive user follows: {}", e);
+            }
         }
     });
 

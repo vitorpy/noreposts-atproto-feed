@@ -1,4 +1,5 @@
 use anyhow::Result;
+use sqlx::Row;
 use std::sync::Arc;
 use tracing::{info, warn};
 

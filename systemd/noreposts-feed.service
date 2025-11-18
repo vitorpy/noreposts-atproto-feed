@@ -4,7 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+User=vitorpy
+Group=http
 WorkingDirectory=/var/www/noreposts-feed
 ExecStart=/var/www/noreposts-feed/following-no-reposts-feed
 Restart=always

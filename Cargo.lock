@@ -149,9 +149,9 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "atrium-api"
-version = "0.25.5"
+version = "0.25.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bceed6a87be6213040945254aa94191490fea22b7f49dec584e349f336cc17a"
+checksum = "ef9d5e9352fd27d99383ae1db2b6a6aa239e683a7e750e8d73a73996d82b1fd2"
 dependencies = [
  "atrium-common",
  "atrium-xrpc",
@@ -197,9 +197,9 @@ dependencies = [
 
 [[package]]
 name = "atrium-identity"
-version = "0.1.6"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "035d4fcfed4a42e10f343e7ffc2b4a5aba355ece4b272a25f683043f07728ce0"
+checksum = "4d3a56cd2bb695308cb078be80a46a7a2caf79203eda27803f13ee6a38b98378"
 dependencies = [
  "atrium-api",
  "atrium-common",
@@ -689,7 +689,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d162beedaa69905488a8da94f5ac3edb4dd4788b732fadb7bd120b2625c1976"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.106",
 ]
 
 [[package]]

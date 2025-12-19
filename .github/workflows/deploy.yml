@@ -85,6 +85,8 @@ jobs:
           echo "FEEDGEN_HOSTNAME=${{ secrets.FEEDGEN_HOSTNAME }}" >> .env.production
           echo "FEEDGEN_SERVICE_DID=${{ secrets.FEEDGEN_SERVICE_DID }}" >> .env.production
           echo "JETSTREAM_HOSTNAME=${{ secrets.JETSTREAM_HOSTNAME }}" >> .env.production
+          echo "FEED_PUBLISHER_DID=${{ secrets.FEED_PUBLISHER_DID }}" >> .env.production
+          echo "FEED_RKEY=${{ secrets.FEED_RKEY }}" >> .env.production
 
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             .env.production \

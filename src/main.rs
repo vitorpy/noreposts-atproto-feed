@@ -60,6 +60,12 @@ struct Args {
         default_value = "/var/run/noreposts-feed.sock"
     )]
     admin_socket: String,
+
+    #[arg(long, env = "FEED_PUBLISHER_DID")]
+    feed_publisher_did: Option<String>,
+
+    #[arg(long, env = "FEED_RKEY", default_value = "following-no-reposts")]
+    feed_rkey: String,
 }
 
 #[derive(Parser)]
@@ -74,6 +80,7 @@ enum Command {
 struct AppState {
     db: Arc<Database>,
     service_did: String,
+    feed_uri: Option<String>,
 }
 
 #[tokio::main]
@@ -98,9 +105,15 @@ async fn main() -> Result<()> {
     let db = Arc::new(Database::new(&args.database_url).await?);
     db.migrate().await?;
 
+    // Construct feed URI if publisher DID is configured
+    let feed_uri = args.feed_publisher_did.map(|did| {
+        format!("at://{}/app.bsky.feed.generator/{}", did, args.feed_rkey)
+    });
+
     let app_state = AppState {
         db: Arc::clone(&db),
         service_did: service_did.clone(),
+        feed_uri,
     };
 
     // Start admin socket
@@ -162,6 +175,10 @@ async fn main() -> Result<()> {
         .route("/", get(root))
         .route("/.well-known/did.json", get(did_document))
         .route(
+            "/xrpc/app.bsky.feed.describeFeedGenerator",
+            get(describe_feed_generator),
+        )
+        .route(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
             get(get_feed_skeleton),
         )
@@ -191,6 +208,21 @@ async fn did_document(State(state): State<AppState>) -> Json<DidDocument> {
                 std::env::var("FEEDGEN_HOSTNAME").unwrap_or_default()
             ),
         }],
+    })
+}
+
+async fn describe_feed_generator(
+    State(state): State<AppState>,
+) -> Json<DescribeFeedGeneratorResponse> {
+    let feeds = state
+        .feed_uri
+        .as_ref()
+        .map(|uri| vec![FeedDescriptor { uri: uri.clone() }])
+        .unwrap_or_default();
+
+    Json(DescribeFeedGeneratorResponse {
+        did: state.service_did.clone(),
+        feeds,
     })
 }
 

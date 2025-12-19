@@ -69,3 +69,15 @@ pub struct ErrorResponse {
     pub error: String,
     pub message: String,
 }
+
+// describeFeedGenerator response
+#[derive(Debug, Serialize)]
+pub struct DescribeFeedGeneratorResponse {
+    pub did: String,
+    pub feeds: Vec<FeedDescriptor>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FeedDescriptor {
+    pub uri: String,
+}

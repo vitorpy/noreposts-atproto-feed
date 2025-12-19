@@ -354,7 +354,7 @@ async fn get_feed_skeleton(
             Json(response).into_response()
         }
         Err(e) => {
-            warn!("Feed generation error: {}", e);
+            tracing::error!("Feed generation error for {}: {:?}", requester_did, e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(types::ErrorResponse {

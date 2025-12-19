@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
+use std::time::{Duration, Instant};
 
 use crate::types::{Follow, Post};
 
@@ -95,7 +96,8 @@ impl Database {
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(Utc::now);
 
-        let rows = sqlx::query(
+        let start = Instant::now();
+        let rows_result = sqlx::query(
             r#"
             SELECT p.uri, p.cid, p.author_did, p.text, p.created_at, p.indexed_at
             FROM posts p
@@ -110,7 +112,31 @@ impl Database {
         .bind(cursor_time.to_rfc3339())
         .bind(limit)
         .fetch_all(&self.pool)
-        .await?;
+        .await;
+
+        let rows = match rows_result {
+            Ok(rows) => {
+                let duration = start.elapsed();
+                if duration > Duration::from_secs(1) {
+                    tracing::warn!(
+                        "Slow query in get_following_posts for {}: {:?}",
+                        follower_did,
+                        duration
+                    );
+                }
+                rows
+            }
+            Err(e) => {
+                let duration = start.elapsed();
+                tracing::error!(
+                    "Database error in get_following_posts for {} after {:?}: {:?}",
+                    follower_did,
+                    duration,
+                    e
+                );
+                return Err(e.into());
+            }
+        };
 
         let mut posts = Vec::new();
         for row in rows {

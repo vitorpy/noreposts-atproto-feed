@@ -20,6 +20,7 @@ Environment="RUST_LOG=info"
 # Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
+RuntimeDirectory=noreposts-feed
 
 [Install]
 WantedBy=multi-user.target

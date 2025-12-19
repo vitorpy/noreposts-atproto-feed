@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     database::Database,
@@ -72,7 +72,7 @@ impl JetstreamEventHandler {
 
         match event {
             JetstreamEvent::Commit { did, commit, .. } => {
-                info!(
+                debug!(
                     "Received commit event: did={}, collection={}, operation={}",
                     did, commit.collection, commit.operation
                 );
@@ -88,10 +88,10 @@ impl JetstreamEventHandler {
                 }
             }
             JetstreamEvent::Account { did, .. } => {
-                info!("Received account event: did={}", did);
+                debug!("Received account event: did={}", did);
             }
             JetstreamEvent::Identity { did, .. } => {
-                info!("Received identity event: did={}", did);
+                debug!("Received identity event: did={}", did);
             }
         }
 
@@ -139,7 +139,7 @@ impl JetstreamEventHandler {
                     if let Err(e) = self.db.insert_post(&post).await {
                         error!("Failed to insert post: {}", e);
                     } else {
-                        info!("Inserted post: {} by {}", uri, did);
+                        debug!("Inserted post: {} by {}", uri, did);
                     }
                 }
             }
@@ -147,7 +147,7 @@ impl JetstreamEventHandler {
                 if let Err(e) = self.db.delete_post(&uri).await {
                     error!("Failed to delete post: {}", e);
                 } else {
-                    info!("Deleted post: {}", uri);
+                    debug!("Deleted post: {}", uri);
                 }
             }
             _ => {} // Ignore updates
@@ -188,7 +188,7 @@ impl JetstreamEventHandler {
                     if let Err(e) = self.db.insert_follow(&follow).await {
                         error!("Failed to insert follow: {}", e);
                     } else {
-                        info!("Inserted follow: {} -> {}", did, target_did);
+                        debug!("Inserted follow: {} -> {}", did, target_did);
                     }
                 }
             }
@@ -196,7 +196,7 @@ impl JetstreamEventHandler {
                 if let Err(e) = self.db.delete_follow(&uri).await {
                     error!("Failed to delete follow: {}", e);
                 } else {
-                    info!("Deleted follow: {}", uri);
+                    debug!("Deleted follow: {}", uri);
                 }
             }
             _ => {} // Ignore updates

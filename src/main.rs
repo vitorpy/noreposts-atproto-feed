@@ -57,7 +57,7 @@ struct Args {
     #[arg(
         long,
         env = "ADMIN_SOCKET",
-        default_value = "/var/run/noreposts-feed.sock"
+        default_value = "/run/noreposts-feed/admin.sock"
     )]
     admin_socket: String,
 

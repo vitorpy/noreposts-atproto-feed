@@ -6,15 +6,17 @@ use tracing::{debug, info, warn};
 
 use crate::{
     database::Database,
+    http_client::{create_client, fetch_json_with_retry},
     types::{Follow, Post},
 };
 
 pub async fn backfill_follows(db: Arc<Database>, user_did: &str) -> Result<()> {
     info!("Starting backfill of follows for {}", user_did);
 
-    let client = reqwest::Client::new();
+    let client = create_client()?;
     let mut cursor: Option<String> = None;
     let mut total_follows = 0;
+    let mut follows_batch: Vec<Follow> = Vec::with_capacity(100);
 
     loop {
         let mut url = format!(
@@ -25,20 +27,38 @@ pub async fn backfill_follows(db: Arc<Database>, user_did: &str) -> Result<()> {
             url.push_str(&format!("&cursor={}", c));
         }
 
-        let response: serde_json::Value = client.get(&url).send().await?.json().await?;
-
-        let follows = response["follows"].as_array();
-        if follows.is_none() {
-            break;
-        }
-
-        for follow in follows.unwrap() {
-            let target_did = follow["did"].as_str().unwrap_or("");
-            if target_did.is_empty() {
-                continue;
+        let response = match fetch_json_with_retry(&client, &url).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Failed to fetch follows for {}: {}", user_did, e);
+                break;
             }
+        };
 
-            let follow_record = Follow {
+        let follows = match response["follows"].as_array() {
+            Some(f) => f,
+            None => {
+                if response.get("follows").is_some() {
+                    warn!(
+                        "Malformed follows response for {}: 'follows' is not an array. Response: {}",
+                        user_did,
+                        serde_json::to_string(&response).unwrap_or_default()
+                    );
+                }
+                break;
+            }
+        };
+
+        for follow in follows {
+            let target_did = match follow["did"].as_str() {
+                Some(did) if !did.is_empty() => did,
+                _ => {
+                    debug!("Skipping follow with missing/empty DID: {:?}", follow);
+                    continue;
+                }
+            };
+
+            follows_batch.push(Follow {
                 uri: format!(
                     "at://{}/app.bsky.graph.follow/{}",
                     user_did,
@@ -48,17 +68,29 @@ pub async fn backfill_follows(db: Arc<Database>, user_did: &str) -> Result<()> {
                 target_did: target_did.to_string(),
                 created_at: chrono::Utc::now(),
                 indexed_at: chrono::Utc::now(),
-            };
+            });
+        }
 
-            match db.insert_follow(&follow_record).await {
-                Ok(_) => total_follows += 1,
-                Err(e) => warn!("Failed to insert follow {}: {}", target_did, e),
+        // Batch insert when we have enough
+        if follows_batch.len() >= 100 {
+            match db.insert_follows_batch(&follows_batch).await {
+                Ok(count) => total_follows += count,
+                Err(e) => warn!("Failed to batch insert follows: {}", e),
             }
+            follows_batch.clear();
         }
 
         cursor = response["cursor"].as_str().map(|s| s.to_string());
         if cursor.is_none() {
             break;
+        }
+    }
+
+    // Insert remaining follows
+    if !follows_batch.is_empty() {
+        match db.insert_follows_batch(&follows_batch).await {
+            Ok(count) => total_follows += count,
+            Err(e) => warn!("Failed to batch insert remaining follows: {}", e),
         }
     }
 
@@ -69,10 +101,11 @@ pub async fn backfill_follows(db: Arc<Database>, user_did: &str) -> Result<()> {
 pub async fn backfill_posts(db: Arc<Database>, target_did: &str, limit: usize) -> Result<()> {
     debug!("Starting backfill of posts for {}", target_did);
 
-    let client = reqwest::Client::new();
+    let client = create_client()?;
     let mut cursor: Option<String> = None;
     let mut total_posts = 0;
     let mut fetched = 0;
+    let mut posts_batch: Vec<Post> = Vec::with_capacity(limit.min(100));
 
     loop {
         let mut url = format!(
@@ -83,14 +116,29 @@ pub async fn backfill_posts(db: Arc<Database>, target_did: &str, limit: usize) -
             url.push_str(&format!("&cursor={}", c));
         }
 
-        let response: serde_json::Value = client.get(&url).send().await?.json().await?;
+        let response = match fetch_json_with_retry(&client, &url).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Failed to fetch posts for {}: {}", target_did, e);
+                break;
+            }
+        };
 
-        let feed = response["feed"].as_array();
-        if feed.is_none() {
-            break;
-        }
+        let feed = match response["feed"].as_array() {
+            Some(f) => f,
+            None => {
+                if response.get("feed").is_some() {
+                    warn!(
+                        "Malformed feed response for {}: 'feed' is not an array. Response: {}",
+                        target_did,
+                        serde_json::to_string(&response).unwrap_or_default()
+                    );
+                }
+                break;
+            }
+        };
 
-        for item in feed.unwrap() {
+        for item in feed {
             let post = &item["post"];
 
             // Skip reposts - check if there's a "reason" field which indicates a repost
@@ -104,46 +152,64 @@ pub async fn backfill_posts(db: Arc<Database>, target_did: &str, limit: usize) -
                 continue; // This is a repost
             }
 
-            let uri = post["uri"].as_str().unwrap_or("");
-            let cid = post["cid"].as_str().unwrap_or("");
+            let uri = match post["uri"].as_str() {
+                Some(u) if !u.is_empty() => u,
+                _ => continue,
+            };
+            let cid = match post["cid"].as_str() {
+                Some(c) if !c.is_empty() => c,
+                _ => continue,
+            };
             let text = record["text"].as_str().unwrap_or("");
             let created_at_str = record["createdAt"].as_str().unwrap_or("");
-
-            if uri.is_empty() || cid.is_empty() {
-                continue;
-            }
 
             let created_at = DateTime::parse_from_rfc3339(created_at_str)
                 .unwrap_or_else(|_| Utc::now().into())
                 .with_timezone(&Utc);
 
-            let post_record = Post {
+            posts_batch.push(Post {
                 uri: uri.to_string(),
                 cid: cid.to_string(),
                 author_did: target_did.to_string(),
                 text: text.to_string(),
                 created_at,
                 indexed_at: Utc::now(),
-            };
-
-            match db.insert_post(&post_record).await {
-                Ok(_) => total_posts += 1,
-                Err(e) => debug!("Failed to insert post {}: {}", uri, e),
-            }
+            });
 
             fetched += 1;
             if fetched >= limit {
-                debug!(
-                    "Backfilled {} posts for {} (limit reached)",
-                    total_posts, target_did
-                );
-                return Ok(());
+                break;
             }
+        }
+
+        // Batch insert when we have enough or reached limit
+        if posts_batch.len() >= 50 || fetched >= limit {
+            match db.insert_posts_batch(&posts_batch).await {
+                Ok(count) => total_posts += count,
+                Err(e) => debug!("Failed to batch insert posts: {}", e),
+            }
+            posts_batch.clear();
+        }
+
+        if fetched >= limit {
+            debug!(
+                "Backfilled {} posts for {} (limit reached)",
+                total_posts, target_did
+            );
+            return Ok(());
         }
 
         cursor = response["cursor"].as_str().map(|s| s.to_string());
         if cursor.is_none() {
             break;
+        }
+    }
+
+    // Insert remaining posts
+    if !posts_batch.is_empty() {
+        match db.insert_posts_batch(&posts_batch).await {
+            Ok(count) => total_posts += count,
+            Err(e) => debug!("Failed to batch insert remaining posts: {}", e),
         }
     }
 

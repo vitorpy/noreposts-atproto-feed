@@ -19,6 +19,7 @@ mod backfill;
 mod cleanup;
 mod database;
 mod feed_algorithm;
+mod http_client;
 mod jetstream_consumer;
 mod publish;
 mod types;
@@ -66,6 +67,9 @@ struct Args {
 
     #[arg(long, env = "FEED_RKEY", default_value = "following-no-reposts")]
     feed_rkey: String,
+
+    #[arg(long, env = "CLEANUP_INTERVAL_SECS", default_value = "300")]
+    cleanup_interval_secs: u64,
 }
 
 #[derive(Parser)]
@@ -81,6 +85,7 @@ struct AppState {
     db: Arc<Database>,
     service_did: String,
     feed_uri: Option<String>,
+    jetstream_handler: Arc<JetstreamEventHandler>,
 }
 
 #[tokio::main]
@@ -110,10 +115,14 @@ async fn main() -> Result<()> {
         format!("at://{}/app.bsky.feed.generator/{}", did, args.feed_rkey)
     });
 
+    // Create Jetstream event handler (shared for health checks)
+    let event_handler = Arc::new(JetstreamEventHandler::new(Arc::clone(&db)));
+
     let app_state = AppState {
         db: Arc::clone(&db),
         service_did: service_did.clone(),
         feed_uri,
+        jetstream_handler: Arc::clone(&event_handler),
     };
 
     // Start admin socket
@@ -124,10 +133,12 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Start cleanup task - runs every 5 minutes
+    // Start cleanup task with configurable interval
     let db_cleanup = Arc::clone(&db);
+    let cleanup_interval = args.cleanup_interval_secs;
+    info!("Cleanup task will run every {} seconds", cleanup_interval);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // Every 5 minutes
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(cleanup_interval));
         loop {
             interval.tick().await;
 
@@ -151,28 +162,24 @@ async fn main() -> Result<()> {
     });
 
     // Start Jetstream consumer with automatic reconnection
-    let event_handler = JetstreamEventHandler::new(Arc::clone(&db));
+    let jetstream_handler = Arc::clone(&event_handler);
     let jetstream_hostname = args.jetstream_hostname.clone();
     tokio::spawn(async move {
         loop {
             info!("Starting Jetstream consumer...");
-            if let Err(e) = event_handler.start(jetstream_hostname.clone()).await {
-                warn!(
-                    "Jetstream consumer error: {}. Reconnecting in 5 seconds...",
-                    e
-                );
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            if let Err(e) = jetstream_handler.start(jetstream_hostname.clone()).await {
+                warn!("Jetstream consumer error: {}", e);
             } else {
-                // Consumer stopped without error, wait before restarting
-                warn!("Jetstream consumer stopped unexpectedly. Reconnecting in 5 seconds...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                warn!("Jetstream consumer stopped unexpectedly");
             }
+            // Backoff is now handled inside the start() method
         }
     });
 
     // Setup web server
     let app = Router::new()
         .route("/", get(root))
+        .route("/health", get(health_check))
         .route("/.well-known/did.json", get(did_document))
         .route(
             "/xrpc/app.bsky.feed.describeFeedGenerator",
@@ -194,6 +201,36 @@ async fn main() -> Result<()> {
 
 async fn root() -> &'static str {
     "Following No Reposts Feed Generator"
+}
+
+#[derive(serde::Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    database: bool,
+    jetstream: bool,
+}
+
+async fn health_check(State(state): State<AppState>) -> Response {
+    let db_healthy = state.db.health_check().await.unwrap_or(false);
+    let jetstream_healthy = state.jetstream_handler.is_healthy();
+
+    let response = HealthResponse {
+        status: if db_healthy && jetstream_healthy {
+            "healthy"
+        } else {
+            "degraded"
+        },
+        database: db_healthy,
+        jetstream: jetstream_healthy,
+    };
+
+    let status_code = if db_healthy {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (status_code, Json(response)).into_response()
 }
 
 async fn did_document(State(state): State<AppState>) -> Json<DidDocument> {

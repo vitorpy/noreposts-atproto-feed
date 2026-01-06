@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
 use std::time::{Duration, Instant};
 
 use crate::types::{Follow, Post};
@@ -11,7 +11,13 @@ pub struct Database {
 
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self> {
-        let pool = SqlitePool::connect(database_url).await?;
+        // Configure connection pool with tuned settings
+        let pool = SqlitePoolOptions::new()
+            .max_connections(20)
+            .acquire_timeout(Duration::from_secs(10))
+            .idle_timeout(Duration::from_secs(300))
+            .connect(database_url)
+            .await?;
 
         // Enable WAL mode for better concurrency
         sqlx::query("PRAGMA journal_mode=WAL;")
@@ -20,6 +26,17 @@ impl Database {
 
         // Set busy timeout to 5 seconds
         sqlx::query("PRAGMA busy_timeout=5000;")
+            .execute(&pool)
+            .await?;
+
+        // Optimize SQLite settings for performance
+        sqlx::query("PRAGMA synchronous=NORMAL;")
+            .execute(&pool)
+            .await?;
+        sqlx::query("PRAGMA cache_size=-64000;") // 64MB cache
+            .execute(&pool)
+            .await?;
+        sqlx::query("PRAGMA temp_store=MEMORY;")
             .execute(&pool)
             .await?;
 
@@ -58,6 +75,48 @@ impl Database {
         Ok(())
     }
 
+    /// Batch insert posts in a single transaction for better performance
+    pub async fn insert_posts_batch(&self, posts: &[Post]) -> Result<usize> {
+        if posts.is_empty() {
+            return Ok(0);
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let mut inserted = 0;
+
+        // Process in chunks of 100 to avoid query size limits
+        for chunk in posts.chunks(100) {
+            let mut query = String::from(
+                "INSERT OR REPLACE INTO posts (uri, cid, author_did, text, created_at, indexed_at) VALUES ",
+            );
+            let mut params: Vec<String> = Vec::new();
+
+            for (i, post) in chunk.iter().enumerate() {
+                if i > 0 {
+                    query.push_str(", ");
+                }
+                query.push_str("(?, ?, ?, ?, ?, ?)");
+                params.push(post.uri.clone());
+                params.push(post.cid.clone());
+                params.push(post.author_did.clone());
+                params.push(post.text.clone());
+                params.push(post.created_at.to_rfc3339());
+                params.push(post.indexed_at.to_rfc3339());
+            }
+
+            let mut q = sqlx::query(&query);
+            for param in &params {
+                q = q.bind(param);
+            }
+
+            let result = q.execute(&mut *tx).await?;
+            inserted += result.rows_affected() as usize;
+        }
+
+        tx.commit().await?;
+        Ok(inserted)
+    }
+
     // Follow operations
     pub async fn insert_follow(&self, follow: &Follow) -> Result<()> {
         sqlx::query(
@@ -82,6 +141,89 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Batch insert follows in a single transaction for better performance
+    pub async fn insert_follows_batch(&self, follows: &[Follow]) -> Result<usize> {
+        if follows.is_empty() {
+            return Ok(0);
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let mut inserted = 0;
+
+        // Process in chunks of 100 to avoid query size limits
+        for chunk in follows.chunks(100) {
+            let mut query = String::from(
+                "INSERT OR REPLACE INTO follows (uri, follower_did, target_did, created_at, indexed_at) VALUES ",
+            );
+            let mut params: Vec<String> = Vec::new();
+
+            for (i, follow) in chunk.iter().enumerate() {
+                if i > 0 {
+                    query.push_str(", ");
+                }
+                query.push_str("(?, ?, ?, ?, ?)");
+                params.push(follow.uri.clone());
+                params.push(follow.follower_did.clone());
+                params.push(follow.target_did.clone());
+                params.push(follow.created_at.to_rfc3339());
+                params.push(follow.indexed_at.to_rfc3339());
+            }
+
+            let mut q = sqlx::query(&query);
+            for param in &params {
+                q = q.bind(param);
+            }
+
+            let result = q.execute(&mut *tx).await?;
+            inserted += result.rows_affected() as usize;
+        }
+
+        tx.commit().await?;
+        Ok(inserted)
+    }
+
+    /// Batch delete stale follows in a single transaction
+    pub async fn delete_stale_follows_batch(
+        &self,
+        user_did: &str,
+        stale_target_dids: &[String],
+    ) -> Result<usize> {
+        if stale_target_dids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let mut deleted = 0;
+
+        // Process in chunks
+        for chunk in stale_target_dids.chunks(100) {
+            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+            let query = format!(
+                "DELETE FROM follows WHERE follower_did = ? AND target_did IN ({})",
+                placeholders.join(", ")
+            );
+
+            let mut q = sqlx::query(&query).bind(user_did);
+            for target in chunk {
+                q = q.bind(target);
+            }
+
+            let result = q.execute(&mut *tx).await?;
+            deleted += result.rows_affected() as usize;
+        }
+
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
+    /// Check database health
+    pub async fn health_check(&self) -> Result<bool> {
+        sqlx::query("SELECT 1")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(true)
     }
 
     // Feed generation queries
@@ -232,21 +374,15 @@ impl Database {
             .collect();
 
         // Find follows in database that no longer exist in current follows
-        let mut removed_count = 0;
-        for db_target in &db_target_dids {
-            if !current_target_dids.contains(db_target) {
-                // This follow no longer exists, remove it
-                sqlx::query("DELETE FROM follows WHERE follower_did = ? AND target_did = ?")
-                    .bind(user_did)
-                    .bind(db_target)
-                    .execute(&self.pool)
-                    .await?;
-                removed_count += 1;
-                tracing::info!("Removed stale follow: {} -> {}", user_did, db_target);
-            }
-        }
+        let current_set: std::collections::HashSet<&String> = current_target_dids.iter().collect();
+        let stale_follows: Vec<String> = db_target_dids
+            .iter()
+            .filter(|did| !current_set.contains(did))
+            .cloned()
+            .collect();
 
-        if removed_count > 0 {
+        if !stale_follows.is_empty() {
+            let removed_count = self.delete_stale_follows_batch(user_did, &stale_follows).await?;
             tracing::info!(
                 "Cleaned up {} stale follows for {}",
                 removed_count,

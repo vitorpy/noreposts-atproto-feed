@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
@@ -12,13 +13,44 @@ use crate::{
     types::{Follow, Post},
 };
 
+/// Maximum backoff delay in seconds
+const MAX_BACKOFF_SECS: u64 = 60;
+/// Initial backoff delay in seconds
+const INITIAL_BACKOFF_SECS: u64 = 1;
+/// Timeout for receiving messages (detects dead connections)
+const MESSAGE_TIMEOUT_SECS: u64 = 90;
+
 pub struct JetstreamEventHandler {
     db: Arc<Database>,
+    consecutive_failures: AtomicU64,
 }
 
 impl JetstreamEventHandler {
     pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+        Self {
+            db,
+            consecutive_failures: AtomicU64::new(0),
+        }
+    }
+
+    /// Check if Jetstream is connected (for health checks)
+    pub fn is_healthy(&self) -> bool {
+        // Consider unhealthy after 3 consecutive failures
+        self.consecutive_failures.load(Ordering::Relaxed) < 3
+    }
+
+    fn get_backoff_duration(&self) -> Duration {
+        let failures = self.consecutive_failures.load(Ordering::Relaxed);
+        let backoff_secs = INITIAL_BACKOFF_SECS.saturating_mul(2u64.saturating_pow(failures as u32));
+        Duration::from_secs(backoff_secs.min(MAX_BACKOFF_SECS))
+    }
+
+    fn reset_backoff(&self) {
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+    }
+
+    fn increment_backoff(&self) {
+        self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     pub async fn start(&self, jetstream_hostname: String) -> Result<()> {
@@ -35,20 +67,55 @@ impl JetstreamEventHandler {
             match tokio_tungstenite::connect_async(&ws_url).await {
                 Ok((mut socket, _response)) => {
                     info!("Connected to Jetstream successfully");
+                    self.reset_backoff();
 
-                    while let Some(msg) = socket.next().await {
-                        match msg {
-                            Ok(Message::Text(text)) => {
+                    loop {
+                        // Use timeout to detect dead connections
+                        let msg_result = tokio::time::timeout(
+                            Duration::from_secs(MESSAGE_TIMEOUT_SECS),
+                            socket.next(),
+                        )
+                        .await;
+
+                        match msg_result {
+                            Ok(Some(Ok(Message::Text(text)))) => {
                                 if let Err(e) = self.handle_message(&text).await {
-                                    error!("Error handling message: {}", e);
+                                    debug!("Error handling message: {}", e);
                                 }
                             }
-                            Ok(Message::Close(_)) => {
-                                warn!("Jetstream connection closed");
+                            Ok(Some(Ok(Message::Ping(data)))) => {
+                                // Respond to pings to keep connection alive
+                                if let Err(e) = futures::SinkExt::send(
+                                    &mut socket,
+                                    Message::Pong(data),
+                                )
+                                .await
+                                {
+                                    warn!("Failed to send pong: {}", e);
+                                    break;
+                                }
+                            }
+                            Ok(Some(Ok(Message::Close(_)))) => {
+                                warn!("Jetstream connection closed by server");
+                                self.increment_backoff();
                                 break;
                             }
-                            Err(e) => {
+                            Ok(Some(Err(e))) => {
                                 error!("WebSocket error: {}", e);
+                                self.increment_backoff();
+                                break;
+                            }
+                            Ok(None) => {
+                                warn!("Jetstream connection ended");
+                                self.increment_backoff();
+                                break;
+                            }
+                            Err(_) => {
+                                warn!(
+                                    "No message received in {} seconds, reconnecting...",
+                                    MESSAGE_TIMEOUT_SECS
+                                );
+                                self.increment_backoff();
                                 break;
                             }
                             _ => {}
@@ -56,14 +123,14 @@ impl JetstreamEventHandler {
                     }
                 }
                 Err(e) => {
-                    error!(
-                        "Failed to connect to Jetstream: {}. Reconnecting in 5 seconds...",
-                        e
-                    );
+                    error!("Failed to connect to Jetstream: {}", e);
+                    self.increment_backoff();
                 }
             }
 
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            let backoff = self.get_backoff_duration();
+            info!("Reconnecting to Jetstream in {:?}...", backoff);
+            tokio::time::sleep(backoff).await;
         }
     }
 
@@ -206,13 +273,6 @@ impl JetstreamEventHandler {
     }
 }
 
-impl Clone for JetstreamEventHandler {
-    fn clone(&self) -> Self {
-        Self {
-            db: Arc::clone(&self.db),
-        }
-    }
-}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind")]

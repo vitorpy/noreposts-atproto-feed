@@ -1,9 +1,11 @@
 use anyhow::Result;
+use futures::StreamExt;
 use sqlx::Row;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::database::Database;
+use crate::http_client::{create_client, fetch_json_with_retry};
 
 pub async fn verify_active_user_follows(db: Arc<Database>) -> Result<()> {
     info!("Starting follow verification for active users");
@@ -12,7 +14,7 @@ pub async fn verify_active_user_follows(db: Arc<Database>) -> Result<()> {
     let active_users = db.get_active_users(7).await?;
     info!("Verifying follows for {} active users", active_users.len());
 
-    let client = reqwest::Client::new();
+    let client = create_client()?;
 
     for user_did in active_users {
         match verify_follows_for_user(&client, Arc::clone(&db), &user_did).await {
@@ -38,27 +40,45 @@ pub async fn verify_active_user_follows(db: Arc<Database>) -> Result<()> {
 pub async fn cleanup_inactive_user_follows(db: Arc<Database>) -> Result<()> {
     info!("Starting cleanup of follows for inactive users");
 
-    // Get all unique follower DIDs from the follows table
-    let all_follower_dids: Vec<String> = sqlx::query("SELECT DISTINCT follower_did FROM follows")
-        .fetch_all(&db.pool)
-        .await?
-        .into_iter()
-        .filter_map(|row| row.try_get("follower_did").ok())
-        .collect();
-
-    info!("Found {} unique users with follows", all_follower_dids.len());
+    // Stream follower DIDs to avoid loading all into memory
+    let mut follower_stream = sqlx::query("SELECT DISTINCT follower_did FROM follows")
+        .fetch(&db.pool);
 
     // Get active users (accessed feed in last 7 days)
     let active_users = db.get_active_users(7).await?;
     let active_user_set: std::collections::HashSet<String> =
         active_users.into_iter().collect();
 
-    // Delete follows for users who are not active
-    let mut deleted_count = 0;
-    for follower_did in all_follower_dids {
-        if !active_user_set.contains(&follower_did) {
+    info!("Found {} active users", active_user_set.len());
+
+    // Collect inactive user DIDs in batches for deletion
+    let mut inactive_dids: Vec<String> = Vec::new();
+    let mut total_users = 0;
+
+    while let Some(row_result) = follower_stream.next().await {
+        match row_result {
+            Ok(row) => {
+                if let Ok(follower_did) = row.try_get::<String, _>("follower_did") {
+                    total_users += 1;
+                    if !active_user_set.contains(&follower_did) {
+                        inactive_dids.push(follower_did);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Error reading follower_did: {}", e);
+            }
+        }
+    }
+
+    info!("Found {} unique users with follows", total_users);
+
+    // Delete follows for inactive users in batches
+    let mut deleted_count: u64 = 0;
+    for chunk in inactive_dids.chunks(50) {
+        for follower_did in chunk {
             let result = sqlx::query("DELETE FROM follows WHERE follower_did = ?")
-                .bind(&follower_did)
+                .bind(follower_did)
                 .execute(&db.pool)
                 .await?;
 
@@ -69,7 +89,7 @@ pub async fn cleanup_inactive_user_follows(db: Arc<Database>) -> Result<()> {
     if deleted_count > 0 {
         info!("Cleaned up {} follows from inactive users", deleted_count);
     } else {
-        info!("No inactive user follows to clean up");
+        debug!("No inactive user follows to clean up");
     }
 
     Ok(())
@@ -92,22 +112,33 @@ async fn verify_follows_for_user(
             url.push_str(&format!("&cursor={}", c));
         }
 
-        let response: serde_json::Value = match client.get(&url).send().await {
-            Ok(r) => r.json().await?,
+        let response = match fetch_json_with_retry(client, &url).await {
+            Ok(r) => r,
             Err(e) => {
                 warn!("Failed to fetch follows for {}: {}", user_did, e);
-                return Err(e.into());
+                return Err(e);
             }
         };
 
-        let follows = response["follows"].as_array();
-        if follows.is_none() {
-            break;
-        }
+        let follows = match response["follows"].as_array() {
+            Some(f) => f,
+            None => {
+                if response.get("follows").is_some() {
+                    warn!(
+                        "Malformed follows response for {}: 'follows' is not an array. Response: {}",
+                        user_did,
+                        serde_json::to_string(&response).unwrap_or_default()
+                    );
+                }
+                break;
+            }
+        };
 
-        for follow in follows.unwrap() {
+        for follow in follows {
             if let Some(target_did) = follow["did"].as_str() {
-                current_follows.push(target_did.to_string());
+                if !target_did.is_empty() {
+                    current_follows.push(target_did.to_string());
+                }
             }
         }
 
